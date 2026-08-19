@@ -1,0 +1,92 @@
+# ============================================================
+# MkDocs 最小配置模板 —— 改 site_name / site_url / repo_url 即可用
+# 完整版参考 HolmesGPT 的 mkdocs.yml
+# ============================================================
+
+site_name: YOUR_PROJECT_NAME
+site_description: YOUR_PROJECT_DESCRIPTION
+site_url: https://example.com/
+repo_url: https://github.com/YOUR_ORG/YOUR_REPO
+repo_name: YOUR_ORG/YOUR_REPO
+edit_uri: edit/master/docs/
+
+# 方式 A: 用 awesome-nav 插件 → nav 留空或按需覆盖
+# 方式 B: 不用 awesome-nav → 在这里写完整导航
+nav:
+    - Home: index.md
+
+theme:
+    name: material
+    custom_dir: docs/overrides
+    features:
+        - content.code.copy
+        - content.tabs.link
+        - navigation.footer
+        - navigation.indexes
+        - navigation.instant
+        - navigation.top
+        - navigation.tracking
+        - search.highlight
+        - search.suggest
+        - toc.follow
+    palette:
+        - media: "(prefers-color-scheme)"
+          toggle:
+              icon: material/brightness-auto
+              name: Switch to light mode
+        - media: "(prefers-color-scheme: light)"
+          scheme: default
+          primary: teal
+          accent: teal
+          toggle:
+              icon: material/brightness-7
+              name: Switch to dark mode
+        - media: "(prefers-color-scheme: dark)"
+          scheme: slate
+          primary: teal
+          accent: teal
+          toggle:
+              icon: material/brightness-4
+              name: Switch to system preference
+    font:
+        text: Inter
+        code: Fira Code
+
+plugins:
+    - awesome-nav
+    - search
+    - glightbox
+
+markdown_extensions:
+    - admonition
+    - attr_list
+    - def_list
+    - footnotes
+    - md_in_html
+    - toc:
+          permalink: true
+    - pymdownx.details
+    - pymdownx.emoji:
+          emoji_generator: !!python/name:material.extensions.emoji.to_svg
+          emoji_index: !!python/name:material.extensions.emoji.twemoji
+    - pymdownx.highlight:
+          anchor_linenums: true
+          line_spans: __span
+          pygments_lang_class: true
+    - pymdownx.inlinehilite
+    - pymdownx.keys
+    - pymdownx.mark
+    - pymdownx.smartsymbols
+    - pymdownx.superfences
+    - pymdownx.tabbed:
+          alternate_style: true
+          combine_header_slug: true
+          slugify: !!python/object/apply:pymdownx.slugs.slugify
+              kwds:
+                  case: lower
+    - pymdownx.tasklist:
+          custom_checkbox: true
+    - pymdownx.tilde
+
+extra_css:
+    - stylesheets/extra.css

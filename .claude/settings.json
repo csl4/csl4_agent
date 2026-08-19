@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(echo \"no-prompt exit=$?\")",
+      "Bash(python -m agent.main run --json-output-file /tmp/out_test.json)",
+      "Bash(echo \"llm-fail exit=$?\")",
+      "Read(//tmp/**)",
+      "Bash(python -m agent.main run --json-output-file C:/Users/fanxin/AppData/Local/Temp/out_test.json)"
+    ]
+  }
+}
