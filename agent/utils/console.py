@@ -7,12 +7,15 @@ tool result display, and status indicators.
 import json
 import os
 import sys
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Callable, Dict, Optional
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -68,12 +71,75 @@ def print_user(text: str) -> None:
     console.print(f"[bold {USER_COLOR}]User:[/bold {USER_COLOR}] {text}")
 
 
-def print_agent(text: str) -> None:
-    """Print the agent's answer rendered as markdown."""
+def print_agent(text: str, elapsed: Optional[float] = None) -> None:
+    """Print the agent's answer rendered as markdown inside a card."""
     console.print()
-    console.print(Text("Agent", style=f"bold {AGENT_COLOR}"))
-    console.print(Markdown(text or "*(empty response)*"))
+    console.print(
+        _agent_panel(Markdown(text or "*(empty response)*"), elapsed=elapsed)
+    )
     console.print()
+
+
+def _agent_panel(body: Any, elapsed: Optional[float] = None) -> Panel:
+    """Build the agent answer card, optionally showing elapsed time."""
+    title = "Agent" if elapsed is None else f"Agent · {elapsed:.1f}s"
+    return Panel(
+        body,
+        title=title,
+        title_align="left",
+        border_style=AGENT_COLOR,
+        padding=(0, 1),
+    )
+
+
+class _ElapsedRenderable:
+    """Spinner + text + live elapsed seconds, recomputed on each Live refresh."""
+
+    def __init__(self, get_text: Callable[[], str], start: float) -> None:
+        self._get_text = get_text
+        self._start = start
+
+    def __rich_console__(self, console: Console, options: Any) -> Any:
+        elapsed = time.monotonic() - self._start
+        yield Spinner(
+            "dots",
+            Text(f" {self._get_text()} {elapsed:.1f}s", style=MUTED_COLOR),
+        )
+
+
+class ElapsedSpinner:
+    """Status spinner that shows elapsed time, e.g. '⠋ Thinking … 3.2s'.
+
+    A no-op on non-terminal outputs. Text can be changed via update() while
+    the spinner keeps running; the timer keeps counting until stop().
+    """
+
+    def __init__(self, text: str = "Thinking …", start: Optional[float] = None) -> None:
+        self._text = text
+        self._start = start if start is not None else time.monotonic()
+        self._live: Optional[Live] = None
+
+    def start(self) -> None:
+        """Start the spinner (no-op on non-terminal outputs)."""
+        if not console.is_terminal:
+            return
+        self._live = Live(
+            _ElapsedRenderable(lambda: self._text, self._start),
+            console=console,
+            refresh_per_second=10,
+            transient=True,
+        )
+        self._live.start()
+
+    def update(self, text: str) -> None:
+        """Change the spinner label; the elapsed timer keeps running."""
+        self._text = text
+
+    def stop(self) -> None:
+        """Stop the spinner; with transient=True the line disappears."""
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
 
 
 def print_tool_result(

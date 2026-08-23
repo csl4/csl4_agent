@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,6 +26,7 @@ from agent.core.conversations import build_chat_messages
 from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.core.tools import ToolsetTag
 from agent.utils.console import (
+    ElapsedSpinner,
     console,
     print_agent,
     print_approval_request,
@@ -138,22 +140,58 @@ def _consume_stream(
     final: Optional[Dict[str, Any]] = None
     pause: Optional[Dict[str, Any]] = None
     message_count: Optional[int] = None
+    streamed_text = ""
+
+    turn_start = time.monotonic()
+
+    def stop_spinner() -> None:
+        nonlocal spinner
+        if spinner is not None:
+            spinner.stop()
+            spinner = None
+
+    def ensure_spinner(text: str) -> None:
+        """Show the spinner with the given label, restarting it if needed."""
+        nonlocal spinner
+        if spinner is None:
+            spinner = ElapsedSpinner(text, start=turn_start)
+            spinner.start()
+        else:
+            spinner.update(text)
+
+    spinner: Optional[ElapsedSpinner] = ElapsedSpinner("Thinking …", start=turn_start)
+    spinner.start()
 
     for event in agent.call_stream(
         messages=messages,
         enable_tool_approval=True,
         tool_decisions=tool_decisions,
     ):
-        if event.event == StreamEvents.ANSWER_END:
+        if event.event == StreamEvents.ANSWER_DELTA:
+            # Stream into the single-line spinner (multi-line Live refresh is
+            # unreliable in IDE pseudo-terminals); the full answer card is
+            # printed once at ANSWER_END.
+            streamed_text += event.data.get("content", "")
+            tail = " ".join(streamed_text.split())[-40:]
+            ensure_spinner(f"Answering … {tail}")
+        elif event.event == StreamEvents.ANSWER_END:
             final = event.data
-            print_agent(event.data.get("content", ""))
+            stop_spinner()
+            print_agent(
+                event.data.get("content", ""),
+                elapsed=time.monotonic() - turn_start,
+            )
+        elif event.event == StreamEvents.START_TOOL:
+            ensure_spinner(f"Running {event.data.get('tool_name', '?')} …")
         elif event.event == StreamEvents.TOOL_RESULT:
             print_tool_result(
                 event.data.get("tool_name", "?"),
                 event.data.get("status", "?"),
                 event.data.get("execution_time_ms", 0.0),
             )
+            ensure_spinner("Thinking …")
         elif event.event == StreamEvents.APPROVAL_REQUIRED:
+            stop_spinner()
             pause = {
                 "kind": "approval",
                 "tool_name": event.data.get("tool_name", "?"),
@@ -162,6 +200,7 @@ def _consume_stream(
             }
             return final, pause
         elif event.event == StreamEvents.FRONTEND_PAUSE:
+            stop_spinner()
             pause = {
                 "kind": "frontend",
                 "tool_name": event.data.get("tool_name", "?"),
@@ -171,6 +210,7 @@ def _consume_stream(
             return final, pause
         elif event.event == StreamEvents.COMPACTION_START:
             message_count = event.data.get("message_count")
+            ensure_spinner("Compressing context …")
             print_compaction_start(
                 event.data.get("current_tokens", "?"),
                 event.data.get("max_tokens", "?"),
@@ -180,8 +220,12 @@ def _consume_stream(
                 message_count if message_count is not None else "...",
                 event.data.get("new_message_count", "?"),
             )
+            ensure_spinner("Thinking …")
         elif event.event == StreamEvents.ERROR:
+            stop_spinner()
             print_error(event.data.get("error", "Unknown error"))
+
+    stop_spinner()
 
     return final, pause
 

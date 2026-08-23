@@ -21,9 +21,9 @@ DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.yaml"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "llm": {
-        "model": "gpt-4o",
+        "model": "deepseek/deepseek-v4-flash",
         "api_key": "",
-        "base_url": "",
+        "base_url": "https://api.deepseek.com",
     },
     "agent": {
         "max_steps": 20,
@@ -162,3 +162,5 @@ class Config:
             ),
             compaction_keep_last_n=agent_config.get("compaction_keep_last_n", 6),
         )
+
+

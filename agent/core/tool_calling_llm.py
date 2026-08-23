@@ -18,6 +18,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from agent.core.llm import LLM, ModelResponse
 from agent.core.models import (
+    StructuredToolResult,
     StructuredToolResultStatus,
     ToolCallResult,
     ToolInvokeContext,
@@ -169,14 +170,26 @@ class ToolCallingLLM:
                         },
                     )
 
-            # ④ LLM call (non-streaming — need complete tool_calls for decisions)
+            # ④ LLM call (streamed so answers render live; the provider
+            # reassembles fragmented tool_calls into a complete response)
             is_last_step = i >= self.max_steps
-            response = self.llm.completion(
+            deltas = self.llm.completion_stream(
                 messages=working_messages,
                 tools=tools if not is_last_step else None,
                 tool_choice="auto" if not is_last_step else "none",
-                stream=False,
             )
+            response: ModelResponse
+            while True:
+                try:
+                    delta = next(deltas)
+                except StopIteration as stop:
+                    response = stop.value
+                    break
+                if delta:
+                    yield StreamMessage(
+                        event=StreamEvents.ANSWER_DELTA,
+                        data={"content": delta},
+                    )
 
             # Append assistant message to history
             assistant_msg: Dict[str, Any] = {"role": "assistant"}
@@ -271,11 +284,11 @@ class ToolCallingLLM:
                         yield result
 
     def _invoke_llm_tool_call(
-        self,
-        tool_call: Dict[str, Any],
-        request_context: Optional[Dict[str, Any]],
-        enable_tool_approval: bool,
-        tool_decisions: Dict[str, bool],
+            self,
+            tool_call: Dict[str, Any],
+            request_context: Optional[Dict[str, Any]],
+            enable_tool_approval: bool,
+            tool_decisions: Dict[str, bool],
     ) -> Any:
         """Execute a single LLM tool call.
 
@@ -297,11 +310,10 @@ class ToolCallingLLM:
             return ToolCallResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
-                result=ToolCallResult(
-                    tool_call_id=tool_call_id,
-                    tool_name=tool_name,
-                    result=StructuredToolResultStatus.ERROR,
-                ).result,
+                result=StructuredToolResult(
+                    status=StructuredToolResultStatus.ERROR,
+                    error=f"Invalid JSON arguments for tool '{tool_name}'",
+                ),
             )
 
         # Lazy initialization
@@ -326,22 +338,21 @@ class ToolCallingLLM:
                         return ToolCallResult(
                             tool_call_id=tool_call_id,
                             tool_name=tool_name,
-                            result=ToolCallResult(
-                                tool_call_id=tool_call_id,
-                                tool_name=tool_name,
-                                result=StructuredToolResultStatus.ERROR,
-                            ).result,
+                            result=StructuredToolResult(
+                                status=StructuredToolResultStatus.ERROR,
+                                error=f"Tool '{tool_name}' was denied by the user",
+                                params=params,
+                            ),
                         )
                 else:
                     # Not yet decided → need approval
                     return ToolCallResult(
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
-                        result=ToolCallResult(
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                            result=StructuredToolResultStatus.APPROVAL_REQUIRED,
-                        ).result,
+                        result=StructuredToolResult(
+                            status=StructuredToolResultStatus.APPROVAL_REQUIRED,
+                            params=params,
+                        ),
                     )
 
         # Build the ToolInvokeContext with taint tracking

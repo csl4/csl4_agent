@@ -1,7 +1,7 @@
 """LLM abstraction layer with LiteLLM provider."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from pydantic import BaseModel
 
@@ -61,6 +61,32 @@ class LLM(ABC):
         """
         ...
 
+    def completion_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        temperature: float = 0.7,
+        response_format: Optional[Dict[str, Any]] = None,
+        drop_params: bool = True,
+    ) -> Generator[str, None, ModelResponse]:
+        """Stream a completion; yields content deltas, returns the full response.
+
+        Default fallback: performs a non-streaming call and yields the whole
+        content as one delta, so providers without streaming still work.
+        """
+        response = self.completion(
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            response_format=response_format,
+            drop_params=drop_params,
+        )
+        if response.content:
+            yield response.content
+        return response
+
     @abstractmethod
     def count_tokens(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> ContextWindowUsage:
         """Count tokens for the given messages and tools."""
@@ -83,6 +109,34 @@ class LiteLLMProvider(LLM):
     def __init__(self, model: str, api_key: str = "", base_url: str = "", **kwargs: Any):
         super().__init__(model=model, api_key=api_key, base_url=base_url, **kwargs)
 
+    def _completion_kwargs(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: str,
+        temperature: float,
+        response_format: Optional[Dict[str, Any]],
+        drop_params: bool,
+    ) -> Dict[str, Any]:
+        """Build the shared litellm.completion kwargs."""
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+        if response_format:
+            kwargs["response_format"] = response_format
+        if drop_params:
+            kwargs["drop_params"] = drop_params
+        return kwargs
+
     def completion(
         self,
         messages: List[Dict[str, Any]],
@@ -96,38 +150,128 @@ class LiteLLMProvider(LLM):
         """Send a completion request via LiteLLM."""
         import litellm
 
-        kwargs: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": stream,
-        }
-
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        if self.base_url:
-            kwargs["api_base"] = self.base_url
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-        if response_format:
-            kwargs["response_format"] = response_format
-        if drop_params:
-            kwargs["drop_params"] = drop_params
+        kwargs = self._completion_kwargs(
+            messages, tools, tool_choice, temperature, response_format, drop_params
+        )
+        kwargs["stream"] = stream
 
         response = litellm.completion(**kwargs)
 
         choice = response.choices[0]
         message = choice.message
 
+        # LiteLLM returns ChatCompletionMessageToolCall objects; serialize them
+        # to OpenAI-format dicts expected by ModelResponse and downstream consumers.
+        raw_tool_calls = getattr(message, "tool_calls", None) or []
+        tool_calls: List[Dict[str, Any]] = [
+            {
+                "id": getattr(tc, "id", None) or "",
+                "type": getattr(tc, "type", None) or "function",
+                "function": {
+                    "name": getattr(getattr(tc, "function", None), "name", None) or "",
+                    "arguments": getattr(getattr(tc, "function", None), "arguments", None) or "",
+                },
+            }
+            for tc in raw_tool_calls
+        ]
+
         return ModelResponse(
             content=getattr(message, "content", None),
-            tool_calls=getattr(message, "tool_calls", None) or [],
+            tool_calls=tool_calls,
             model=response.model or self.model,
             usage=ContextWindowUsage(
                 total_tokens=getattr(response.usage, "total_tokens", 0),
                 prompt_tokens=getattr(response.usage, "prompt_tokens", 0),
                 completion_tokens=getattr(response.usage, "completion_tokens", 0),
+            ),
+        )
+
+    def completion_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        temperature: float = 0.7,
+        response_format: Optional[Dict[str, Any]] = None,
+        drop_params: bool = True,
+    ) -> Generator[str, None, ModelResponse]:
+        """Stream a completion via LiteLLM.
+
+        Yields content delta strings as they arrive, then returns the fully
+        assembled ModelResponse (content + reassembled tool_calls + usage).
+        Tool-call chunks arrive fragmented by index (the first fragment carries
+        the id and name, later ones only argument increments); they are
+        accumulated here so downstream logic sees a complete response.
+        """
+        import litellm
+
+        kwargs = self._completion_kwargs(
+            messages, tools, tool_choice, temperature, response_format, drop_params
+        )
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+
+        response_stream = litellm.completion(**kwargs)
+
+        content_parts: List[str] = []
+        # index -> {"id": ..., "name": ..., "arguments": accumulated}
+        fragments: Dict[int, Dict[str, str]] = {}
+        usage: Optional[Any] = None
+        model = self.model
+
+        for chunk in response_stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            model = getattr(chunk, "model", None) or model
+
+            piece = getattr(delta, "content", None)
+            if piece:
+                content_parts.append(piece)
+                yield piece
+
+            for tc in getattr(delta, "tool_calls", None) or []:
+                idx = getattr(tc, "index", None)
+                idx = 0 if idx is None else idx
+                frag = fragments.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    frag["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    name = getattr(fn, "name", None)
+                    if name:
+                        # Providers either send the name once, split it across
+                        # chunks, or repeat it whole on every chunk; append only
+                        # what is not already the complete repeated name.
+                        if not frag["name"] or name != frag["name"]:
+                            frag["name"] += name
+                    arguments = getattr(fn, "arguments", None)
+                    if arguments:
+                        frag["arguments"] += arguments
+
+        tool_calls: List[Dict[str, Any]] = [
+            {
+                "id": frag["id"],
+                "type": "function",
+                "function": {"name": frag["name"], "arguments": frag["arguments"]},
+            }
+            for _, frag in sorted(fragments.items())
+        ]
+
+        return ModelResponse(
+            content="".join(content_parts) or None,
+            tool_calls=tool_calls,
+            model=model,
+            usage=ContextWindowUsage(
+                total_tokens=getattr(usage, "total_tokens", 0),
+                prompt_tokens=getattr(usage, "prompt_tokens", 0),
+                completion_tokens=getattr(usage, "completion_tokens", 0),
             ),
         )
 
@@ -158,6 +302,7 @@ class LiteLLMProvider(LLM):
             "claude-3-sonnet": 200000,
             "claude-3-haiku": 200000,
             "claude-3.5-sonnet": 200000,
+            "deepseek-v4-flash": 200000,
         }
         for key, size in context_windows.items():
             if key in self.model.lower():

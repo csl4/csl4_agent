@@ -9,6 +9,7 @@ from pydantic import BaseModel
 class StreamEvents(str, Enum):
     """Event types emitted during the agent loop."""
 
+    ANSWER_DELTA = "ai_answer_delta"
     ANSWER_END = "ai_answer_end"
     START_TOOL = "start_tool_calling"
     TOOL_RESULT = "tool_calling_result"
