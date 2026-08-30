@@ -1,4 +1,14 @@
-"""Conversation message management for the agent."""
+"""智能体的对话消息管理。"""
+
+
+# ======================= 中文导览 =======================
+# 本文件是【对话消息构造器】：把零散材料拼成 LLM 能吃的 messages dict 列表。
+#   核心入口 build_chat_messages：
+#     输入：用户问句 + 会话历史 + toolsets + 系统提示词各组件等；
+#     输出：messages = [system, user, (可选历史...)] 一目了然。
+# 设计要点：对话本质是「普通 dict 的列表」，不是对象 —— 它是整条数据流的主跑道，
+#           所有工具结果最终都以 role:"tool" 消息压回这里，再喂给 LLM。
+# =========================================================
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -13,17 +23,17 @@ def add_or_update_system_prompt(
     messages: List[Dict[str, Any]],
     system_prompt: str,
 ) -> List[Dict[str, Any]]:
-    """Update the system prompt in an existing conversation history.
+    """在已有对话历史中更新系统提示词。
 
-    If the first message is a system message, replace its content.
-    Otherwise, insert a new system message at the beginning.
+    如果第一条消息是系统消息，则替换其内容；
+    否则，在开头插入一条新的系统消息。
 
-    Args:
-        messages: Existing conversation messages.
-        system_prompt: The new system prompt content.
+    参数:
+        messages: 已有的对话消息。
+        system_prompt: 新的系统提示词内容。
 
-    Returns:
-        Modified messages list with updated system prompt.
+    返回:
+        更新了系统提示词后的消息列表。
     """
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = system_prompt
@@ -33,6 +43,8 @@ def add_or_update_system_prompt(
     return messages
 
 
+# 核心入口：构造首轮 messages。内部先 build_system_prompt，再 build_user_prompt(可能含图)，
+    # 再接上既有 conversation_history。
 def build_chat_messages(
     ask: str,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
@@ -44,21 +56,21 @@ def build_chat_messages(
     custom_components: Optional[Dict[PromptComponent, str]] = None,
     system_prompt_additions: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Build the initial chat messages for an agent call.
+    """构建一次智能体调用的初始聊天消息。
 
-    Args:
-        ask: The user's question/request.
-        conversation_history: Optional previous conversation messages.
-        toolsets: List of available Toolset objects.
-        global_instructions: Optional global guardrails.
-        skills: Optional skill descriptions.
-        images: Optional image attachments.
-        behavior_controls: Dict mapping PromptComponent to bool (True = include).
-        custom_components: Dict mapping PromptComponent to custom content.
-        system_prompt_additions: User-defined extra instructions.
+    参数:
+        ask: 用户的问题/请求。
+        conversation_history: 可选的先前对话消息。
+        toolsets: 可用 Toolset 对象列表。
+        global_instructions: 可选的全局护栏（guardrails）。
+        skills: 可选的技能描述。
+        images: 可选的图片附件。
+        behavior_controls: 将 PromptComponent 映射到 bool 的字典（True = 包含）。
+        custom_components: 将 PromptComponent 映射到自定义内容的字典。
+        system_prompt_additions: 用户自定义的额外指令。
 
-    Returns:
-        List of chat messages ready for LLM consumption.
+    返回:
+        可供 LLM 直接使用的聊天消息列表。
     """
     system_prompt = build_system_prompt(
         toolsets=toolsets or [],

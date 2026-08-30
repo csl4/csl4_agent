@@ -1,10 +1,10 @@
-"""Conversation compaction — summarizes older messages to save context window space.
+"""对话压缩 —— 对较早的消息做摘要，以节省上下文窗口空间。
 
-Strategy:
-1. Keep the system prompt intact.
-2. Keep the last `keep_last_n` messages (most recent conversation turns).
-3. Send the older messages to an LLM for summarization.
-4. Insert the summary as a system message after the system prompt.
+策略：
+1. 保持系统提示词不变。
+2. 保留最后 `keep_last_n` 条消息（最近的对话轮次）。
+3. 将较早的消息交给 LLM 进行摘要。
+4. 在系统提示词之后，把摘要作为一条系统消息插入。
 """
 
 import logging
@@ -21,11 +21,16 @@ DEFAULT_COMPACTION_PROMPT = (
 )
 
 
+# ---- 行为对象：对话压缩器 ----
+# 输入：过长的 messages 列表；输出：更短的 messages（旧消息被摘要成一条 system 消息）。
+# 设计要点：保系统提示词 + 最近的 keep_last_n 条，其余交给 LLM 摘要；
+#           就有个细节——压缩边界若恰好落在 assistant.tool_calls 消息后，会被拉进保留区，
+#           避免「工具结果悬空、下轮 LLM 调用因 orphaned tool_call 被拒」。
 class ConversationCompactor:
-    """Compacts long conversation histories by summarizing older messages.
+    """通过摘要较早的消息来压缩过长的对话历史。
 
-    Uses an LLM to generate a concise summary of older messages,
-    replacing them with a single system message to save context window space.
+    使用 LLM 为较早的消息生成简洁摘要，
+    用一条系统消息替换它们，以节省上下文窗口空间。
     """
 
     def __init__(
@@ -34,13 +39,13 @@ class ConversationCompactor:
         compaction_prompt: Optional[str] = None,
         keep_last_n: int = 6,
     ):
-        """Initialize the compactor.
+        """初始化压缩器。
 
-        Args:
-            llm: LLM instance (must have a completion() method).
-            compaction_prompt: Custom prompt template for summarization.
-                Must contain `{conversation}` placeholder.
-            keep_last_n: Number of most recent messages to keep uncompressed.
+        参数:
+            llm: LLM 实例（必须具有 completion() 方法）。
+            compaction_prompt: 用于摘要的自定义提示词模板。
+                必须包含 `{conversation}` 占位符。
+            keep_last_n: 保留不压缩的最近消息条数。
         """
         self.llm = llm
         self.compaction_prompt = compaction_prompt or DEFAULT_COMPACTION_PROMPT
@@ -51,17 +56,17 @@ class ConversationCompactor:
         messages: List[Dict[str, Any]],
         keep_last_n: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Compact conversation history to reduce token count.
+        """压缩对话历史以减少 token 数量。
 
-        Keeps the system prompt and the most recent messages intact.
-        Summarizes older messages into a single system-level summary.
+        保持系统提示词和最近的消息不变。
+        将较早的消息摘要成一条系统级摘要。
 
-        Args:
-            messages: The full conversation message list.
-            keep_last_n: Override the default keep_last_n for this call.
+        参数:
+            messages: 完整的对话消息列表。
+            keep_last_n: 本次调用对默认 keep_last_n 的覆盖值。
 
-        Returns:
-            A shorter message list with older messages replaced by a summary.
+        返回:
+            更短的消息列表，较早的消息被替换为摘要。
         """
         if keep_last_n is None:
             keep_last_n = self.keep_last_n
@@ -90,15 +95,22 @@ class ConversationCompactor:
 
         summarize_end = total - keep_last_n
 
+        # Don't split an assistant tool_calls message from its tool result
+        # messages: if the boundary lands right after such an assistant
+        # message (assistant summarized, its tool results kept), the kept
+        # tool messages dangle without their request and providers reject
+        # the next LLM call. Pull the assistant message into the keep zone.
+        while (
+            summarize_end > summarize_start
+            and messages[summarize_end - 1].get("role") == "assistant"
+            and messages[summarize_end - 1].get("tool_calls")
+        ):
+            summarize_end -= 1
+
         if summarize_start >= summarize_end:
             return messages
 
         to_summarize = messages[summarize_start:summarize_end]
-        to_keep = messages[:summarize_start] + messages[summarize_end:]
-
-        # Filter out pure system messages from keep zone
-        # (they'll be replaced by the summary)
-        to_keep = [m for m in to_keep if m.get("role") != "system" or messages.index(m) < summarize_start]
 
         # Generate summary
         summary = self._summarize(to_summarize)
@@ -131,13 +143,13 @@ class ConversationCompactor:
         return compacted
 
     def _summarize(self, messages: List[Dict[str, Any]]) -> str:
-        """Generate a summary of the given messages using the LLM.
+        """使用 LLM 为给定消息生成摘要。
 
-        Args:
-            messages: List of messages to summarize.
+        参数:
+            messages: 需要摘要的消息列表。
 
-        Returns:
-            A concise summary string.
+        返回:
+            一段简洁的摘要字符串。
         """
         # Format messages as readable text
         conversation_text = self._format_messages(messages)
@@ -161,13 +173,13 @@ class ConversationCompactor:
 
     @staticmethod
     def _format_messages(messages: List[Dict[str, Any]]) -> str:
-        """Format a list of messages as readable text for summarization.
+        """将消息列表格式化为可供摘要的可读文本。
 
-        Args:
-            messages: List of chat messages.
+        参数:
+            messages: 聊天消息列表。
 
-        Returns:
-            Formatted conversation text.
+        返回:
+            格式化后的对话文本。
         """
         lines: List[str] = []
         for msg in messages:

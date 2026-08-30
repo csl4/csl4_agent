@@ -1,11 +1,19 @@
-"""Filesystem toolset - local file operations.
+"""文件系统工具集——本地文件操作。
 
-Provides tools for reading, listing, searching, and modifying local files.
-All paths are validated to stay inside the configured root_dir (sandbox).
+提供用于列目录、读取、搜索和检视本地文件的只读工具。所有路径都会被校验，
+确保不会超出配置的 root_dir（沙箱）。
 
-Write/delete operations are marked approval-required so the CLI prompts
-the user before they execute.
+此处刻意不提供文件修改能力：请使用 bash 工具集，它依据前缀白/黑名单校验命令，
+并对任何未显式放行的操作要求用户审批。
 """
+
+# ======================= 中文导览 =======================
+# 文件系统工具集（只读）：列目录 / 读文件 / 搜文件 / 查元数据。
+#   每个工具皆是 Tool 子类，只实现 _invoke()。
+# 安全设计：所有路径经 _resolve_safe_path() 校验【不得越出 root_dir 沙箱】；
+#          刻意不提供写/删——写删走 bash 工具集（带前缀白名单+人工审批）。
+# create_filesystem_toolset() 是登记进 BUILTIN_PYTHON_TOOLSETS 的工厂，tags=[CLI]。
+# =========================================================
 
 import fnmatch
 import os
@@ -34,7 +42,7 @@ from agent.utils.pydantic_utils import ToolsetConfig
 
 
 class FilesystemToolConfig(ToolsetConfig):
-    """Configuration for the filesystem toolset."""
+    """文件系统工具集的配置。"""
 
     root_dir: str = Field(
         default=".",
@@ -45,11 +53,11 @@ class FilesystemToolConfig(ToolsetConfig):
 
 
 def _resolve_safe_path(config: FilesystemToolConfig, path: str) -> tuple[Optional[Path], Optional[str]]:
-    """Resolve a user-supplied path against the sandbox root.
+    """在沙箱根目录下解析用户提供的路径。
 
-    Returns:
-        (resolved_path, None) on success, or (None, error_message) if the
-        path escapes the sandbox root.
+    返回:
+        成功时返回 (resolved_path, None)，若路径越出沙箱根目录则返回
+        (None, error_message)。
     """
     root = Path(config.root_dir).resolve()
     target = (root / path).resolve() if path else root
@@ -63,15 +71,16 @@ def _resolve_safe_path(config: FilesystemToolConfig, path: str) -> tuple[Optiona
 
 
 def _get_config(context: ToolInvokeContext) -> FilesystemToolConfig:
-    """Get the toolset config from the invocation context."""
+    """从调用上下文中获取工具集配置。"""
     toolset = getattr(context, "toolset", None)
     if toolset is not None and toolset.config is not None:
         return toolset.config
     return FilesystemToolConfig()
 
 
+# ---- 只读工具：列目录（输入 path+可选 pattern → 输出条目清单）----
 class ListDirectoryTool(Tool):
-    """List files and subdirectories in a directory."""
+    """列出目录中的文件和子目录。"""
 
     name: str = "list_directory"
     description: str = (
@@ -151,8 +160,9 @@ class ListDirectoryTool(Tool):
         )
 
 
+# ---- 只读工具：读文件（输入 path+start_line+max_lines → 输出文本内容，分页截断）----
 class ReadFileTool(Tool):
-    """Read the contents of a text file."""
+    """读取文本文件的内容。"""
 
     name: str = "read_file"
     description: str = (
@@ -237,8 +247,10 @@ class ReadFileTool(Tool):
         )
 
 
+# ---- 只读工具：按名模式搜文件（输入 pattern+path → 输出匹配路径列表，上限200）----
+# 挂 JsonTruncationTransformer 兜底防超大结果。
 class SearchFilesTool(Tool):
-    """Search for files by name pattern."""
+    """按名称模式搜索文件。"""
 
     name: str = "search_files"
     description: str = (
@@ -319,8 +331,9 @@ class SearchFilesTool(Tool):
         )
 
 
+# ---- 只读工具：查文件/目录元数据（输入 path → 输出 size/时间戳/类型）----
 class FileInfoTool(Tool):
-    """Get metadata about a file or directory."""
+    """获取文件或目录的元数据。"""
 
     name: str = "file_info"
     description: str = "Get metadata (size, timestamps, permissions) about a file or directory."
@@ -372,150 +385,31 @@ class FileInfoTool(Tool):
         )
 
 
-class WriteFileTool(Tool):
-    """Write content to a file (requires approval)."""
-
-    name: str = "write_file"
-    description: str = (
-        "Write or append text content to a file. Parent directories are "
-        "created automatically. This modifies the filesystem and requires approval."
-    )
-    parameters: Dict[str, ToolParameter] = {
-        "path": ToolParameter(
-            type="string",
-            description="File path relative to the workspace root",
-            required=True,
-        ),
-        "content": ToolParameter(
-            type="string",
-            description="Text content to write",
-            required=True,
-        ),
-        "append": ToolParameter(
-            type="boolean",
-            description="If true, append to the file instead of overwriting",
-            required=False,
-            default=False,
-        ),
-    }
-
-    def _invoke(self, params: Dict[str, Any], context: ToolInvokeContext) -> StructuredToolResult:
-        config = _get_config(context)
-        path = params.get("path", "")
-        content = params.get("content", "")
-        append = bool(params.get("append", False))
-
-        target, error = _resolve_safe_path(config, path)
-        if error:
-            return StructuredToolResult(
-                status=StructuredToolResultStatus.ERROR, error=error, params=params
-            )
-
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            mode = "a" if append else "w"
-            with open(target, mode, encoding=config.encoding) as f:
-                f.write(content)
-        except OSError as e:
-            return StructuredToolResult(
-                status=StructuredToolResultStatus.ERROR,
-                error=f"Failed to write file: {e}",
-                params=params,
-            )
-
-        return StructuredToolResult(
-            status=StructuredToolResultStatus.SUCCESS,
-            data={
-                "path": str(target),
-                "bytes_written": len(content.encode(config.encoding)),
-                "mode": "append" if append else "overwrite",
-            },
-            params=params,
-        )
-
-
-class DeleteFileTool(Tool):
-    """Delete a file (requires approval)."""
-
-    name: str = "delete_file"
-    description: str = (
-        "Delete a file. This is irreversible and requires approval. "
-        "Directories cannot be deleted with this tool."
-    )
-    parameters: Dict[str, ToolParameter] = {
-        "path": ToolParameter(
-            type="string",
-            description="File path relative to the workspace root",
-            required=True,
-        ),
-    }
-
-    def _invoke(self, params: Dict[str, Any], context: ToolInvokeContext) -> StructuredToolResult:
-        config = _get_config(context)
-        path = params.get("path", "")
-
-        target, error = _resolve_safe_path(config, path)
-        if error:
-            return StructuredToolResult(
-                status=StructuredToolResultStatus.ERROR, error=error, params=params
-            )
-
-        if target.is_dir():
-            return StructuredToolResult(
-                status=StructuredToolResultStatus.ERROR,
-                error=f"'{path}' is a directory; directory deletion is not supported.",
-                params=params,
-            )
-        if not target.is_file():
-            return StructuredToolResult(
-                status=StructuredToolResultStatus.NO_DATA,
-                data={"message": f"File '{path}' does not exist; nothing to delete."},
-                params=params,
-            )
-
-        try:
-            target.unlink()
-        except OSError as e:
-            return StructuredToolResult(
-                status=StructuredToolResultStatus.ERROR,
-                error=f"Failed to delete file: {e}",
-                params=params,
-            )
-
-        return StructuredToolResult(
-            status=StructuredToolResultStatus.SUCCESS,
-            data={"deleted": str(target)},
-            params=params,
-        )
-
-
 def create_filesystem_toolset(
     install_config: Optional[Dict[str, Any]] = None,
 ) -> Toolset:
-    """Create the filesystem toolset.
+    """创建文件系统工具集（只读工具）。
 
-    Args:
-        install_config: Optional config overrides (e.g. {"root_dir": "/data"}).
+    参数:
+        install_config: 可选的配置覆盖（例如 {"root_dir": "/data"}）。
 
-    Returns:
-        Configured Toolset with read tools always available and
-        write/delete tools requiring human approval.
+    返回:
+        配置好只读文件工具的 Toolset。文件修改由 bash 工具集结合校验与
+        审批处理。
     """
     config = FilesystemToolConfig(**(install_config or {}))
 
     return Toolset(
         name="filesystem",
         description=(
-            "Local file operations: list, read, search, inspect, write, and "
-            "delete files inside the workspace sandbox."
+            "Read-only local file operations: list, read, search, and inspect "
+            "files inside the workspace sandbox."
         ),
         tools=[
             ListDirectoryTool(),
             ReadFileTool(),
             SearchFilesTool(),
             FileInfoTool(),
-            WriteFileTool(),
-            DeleteFileTool(),
         ],
         prerequisites=[
             CallablePrerequisite(
@@ -526,5 +420,4 @@ def create_filesystem_toolset(
         config=config,
         type=ToolsetType.PYTHON,
         tags=[ToolsetTag.CLI],
-        approval_required_tools=["write_file", "delete_file"],
     )

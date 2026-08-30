@@ -1,4 +1,13 @@
-"""Logging configuration for the agent."""
+"""agent 的日志配置。"""
+
+# ======================= 中文导览 =======================
+# 日志装配：setup_logging(level, format) 配置 `agent` 根日志器。
+# 主循环内部用 logger.info/debug 打点（命令执行、工具调用等），由这里统一格式化到 stderr。
+# 关键前置动作（须在首次 import litellm 前）：
+#   · 设 LITELLM_LOCAL_MODEL_COST_MAP=True（跳过远端模型成本表、离线友好）。
+#   · 把 LiteLLM 日志压到 ERROR（压掉无害的 WARNING 降级提示）。
+# 默认级别取 agent.common.LOG_LEVEL（环境变量 AGENT_LOG_LEVEL），可被 level 参数覆盖。
+# =========================================================
 
 import logging
 import os
@@ -8,11 +17,11 @@ from agent.common import LOG_LEVEL
 
 
 def setup_logging(level: str | None = None, format_string: str | None = None) -> None:
-    """Configure the root logger for the agent.
+    """配置 agent 的根日志器。
 
-    Args:
-        level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL). Defaults to AGENT_LOG_LEVEL env var.
-        format_string: Custom log format. Defaults to ISO timestamp + level + logger + message.
+    参数:
+        level: 日志级别（DEBUG、INFO、WARNING、ERROR、CRITICAL）。默认取 AGENT_LOG_LEVEL 环境变量。
+        format_string: 自定义日志格式。默认为 ISO 时间戳 + 级别 + 日志器 + 消息。
     """
     # Skip LiteLLM's remote model-cost-map fetch entirely (offline-friendly) and
     # silence its harmless WARNING-level fallback notices. Must run before the

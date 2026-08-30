@@ -1,4 +1,16 @@
-"""LLM abstraction layer with LiteLLM provider."""
+"""基于 LiteLLM 的 LLM 抽象层。"""
+
+
+# ======================= 中文导览 =======================
+# 本文件是「LLM 抽象层」（行为对象）：
+#   LLM(ABC)        → 供应商抽象基类。输入 messages(+tools)，输出 ModelResponse；
+#                      子类实现真实 API 调用（completion / completion_stream / count_tokens
+#                      / get_context_window_size...）。
+#   LiteLLMProvider → 基于 LiteLLM 的具体实现，负责把【流式分片 tool_calls】正确重组完整。
+#   ModelResponse   → 值对象：LLM 返回快照（content + tool_calls + usage + model）。
+# 设计理念：上层主循环只认识 LLM 抽象，不绑死某一供应商 —— 换模型/API 不碰主循环。
+# =========================================================
+
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional
@@ -8,24 +20,29 @@ from pydantic import BaseModel
 from agent.core.models import ContextWindowUsage
 
 
+# ---- 值对象：LLM 返回快照 ----
 class ModelResponse(BaseModel):
-    """Typed wrapper for LLM completion responses."""
+    """LLM 补全（completion）响应的类型化包装。"""
 
-    content: Optional[str] = None
-    tool_calls: List[Dict[str, Any]] = []
-    model: str = ""
+    content: Optional[str] = None #
+    tool_calls: List[Dict[str, Any]] = [] #
+    model: str = "" #
     usage: Optional[ContextWindowUsage] = None
 
     class Config:
-        """Pydantic config for ModelResponse."""
+        """ModelResponse 的 Pydantic 配置。"""
 
         arbitrary_types_allowed = True
 
 
+# ---- 行为对象：LLM 供应商抽象基类 ----
+# 输入：messages(+tools) 等 OpenAPI 风格参数；输出：ModelResponse。
+# 子类实现四件事：completion、completion_stream、count_tokens、get_context_window_size。
+# 默认 completion_stream 退化为一次性 completion（无流式能力的 provider 也能跑）。
 class LLM(ABC):
-    """Abstract base for LLM providers.
+    """LLM 供应商的抽象基类。
 
-    Subclasses implement the actual API calls (LiteLLM, boto3, etc.).
+    子类实现实际的 API 调用（LiteLLM、boto3 等）。
     """
 
     def __init__(self, model: str, api_key: str = "", base_url: str = "", **kwargs: Any):
@@ -45,19 +62,19 @@ class LLM(ABC):
         response_format: Optional[Dict[str, Any]] = None,
         drop_params: bool = True,
     ) -> ModelResponse:
-        """Send a completion request to the LLM.
+        """向 LLM 发送一次补全（completion）请求。
 
-        Args:
-            messages: Chat messages in OpenAI format.
-            tools: Tool definitions in OpenAI format.
-            tool_choice: "auto", "none", or "required".
-            temperature: Sampling temperature.
-            stream: Whether to stream the response.
-            response_format: Optional response format spec.
-            drop_params: Whether to drop unsupported params.
+        参数:
+            messages: OpenAI 格式的聊天消息。
+            tools: OpenAI 格式的工具定义。
+            tool_choice: "auto"、"none" 或 "required"。
+            temperature: 采样温度。
+            stream: 是否流式输出响应。
+            response_format: 可选的响应格式规范。
+            drop_params: 是否丢弃不支持的参数。
 
-        Returns:
-            ModelResponse with content and/or tool_calls.
+        返回:
+            包含 content 和/或 tool_calls 的 ModelResponse。
         """
         ...
 
@@ -70,10 +87,10 @@ class LLM(ABC):
         response_format: Optional[Dict[str, Any]] = None,
         drop_params: bool = True,
     ) -> Generator[str, None, ModelResponse]:
-        """Stream a completion; yields content deltas, returns the full response.
+        """流式输出一次补全；产出内容增量，返回完整响应。
 
-        Default fallback: performs a non-streaming call and yields the whole
-        content as one delta, so providers without streaming still work.
+        默认回退：执行一次非流式调用，并把全部内容作为单个增量产出，
+        因此不支持流式的供应商也能正常工作。
         """
         response = self.completion(
             messages=messages,
@@ -89,22 +106,25 @@ class LLM(ABC):
 
     @abstractmethod
     def count_tokens(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> ContextWindowUsage:
-        """Count tokens for the given messages and tools."""
+        """统计给定消息和工具的 token 数量。"""
         ...
 
     @abstractmethod
     def get_context_window_size(self) -> int:
-        """Return the maximum context window size for this model."""
+        """返回该模型的最大上下文窗口大小。"""
         ...
 
     @abstractmethod
     def get_maximum_output_token(self) -> int:
-        """Return the maximum output tokens for this model."""
+        """返回该模型的最大输出 token 数。"""
         ...
 
 
+# ---- 行为对象：LiteLLM 具体实现 ----
+# 亮点：completion_stream 里 tool_calls 以【分片】到达（首片带 id/name，后续只累加参数片段），
+#       这里按 index 分片累加重组，且对 name 的三种发送方式(一次/split/重复)兼容。
 class LiteLLMProvider(LLM):
-    """LLM provider backed by LiteLLM."""
+    """由 LiteLLM 支撑的 LLM 供应商实现。"""
 
     def __init__(self, model: str, api_key: str = "", base_url: str = "", **kwargs: Any):
         super().__init__(model=model, api_key=api_key, base_url=base_url, **kwargs)
@@ -118,7 +138,7 @@ class LiteLLMProvider(LLM):
         response_format: Optional[Dict[str, Any]],
         drop_params: bool,
     ) -> Dict[str, Any]:
-        """Build the shared litellm.completion kwargs."""
+        """构建共用的 litellm.completion kwargs。"""
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -147,7 +167,7 @@ class LiteLLMProvider(LLM):
         response_format: Optional[Dict[str, Any]] = None,
         drop_params: bool = True,
     ) -> ModelResponse:
-        """Send a completion request via LiteLLM."""
+        """通过 LiteLLM 发送一次补全（completion）请求。"""
         import litellm
 
         kwargs = self._completion_kwargs(
@@ -195,17 +215,16 @@ class LiteLLMProvider(LLM):
         response_format: Optional[Dict[str, Any]] = None,
         drop_params: bool = True,
     ) -> Generator[str, None, ModelResponse]:
-        """Stream a completion via LiteLLM.
+        """通过 LiteLLM 流式输出一次补全（completion）。
 
-        Yields content delta strings as they arrive, then returns the fully
-        assembled ModelResponse (content + reassembled tool_calls + usage).
-        Tool-call chunks arrive fragmented by index (the first fragment carries
-        the id and name, later ones only argument increments); they are
-        accumulated here so downstream logic sees a complete response.
+        逐块产出内容增量字符串，最后返回完整组装好的 ModelResponse
+        （content + 重组后的 tool_calls + usage）。
+        工具调用（tool_calls）分片按 index 抵达（首个分片携带 id 和 name，
+        后续分片只带参数增量）；在此累加，使下游逻辑看到完整响应。
         """
         import litellm
 
-        kwargs = self._completion_kwargs(
+        kwargs = self._completion_kwargs( # 拼接kwargs
             messages, tools, tool_choice, temperature, response_format, drop_params
         )
         kwargs["stream"] = True
@@ -213,10 +232,11 @@ class LiteLLMProvider(LLM):
 
         response_stream = litellm.completion(**kwargs)
 
-        content_parts: List[str] = []
+        content_parts: List[str] = [] # 文本碎片
         # index -> {"id": ..., "name": ..., "arguments": accumulated}
-        fragments: Dict[int, Dict[str, str]] = {}
-        usage: Optional[Any] = None
+        fragments: Dict[int, Dict[str, str]] = {}# 工具碎片调用重组
+
+        usage: Optional[Any] = None # token 用量暂存 最后一个才提取
         model = self.model
 
         for chunk in response_stream:
@@ -247,9 +267,16 @@ class LiteLLMProvider(LLM):
                     name = getattr(fn, "name", None)
                     if name:
                         # Providers either send the name once, split it across
-                        # chunks, or repeat it whole on every chunk; append only
-                        # what is not already the complete repeated name.
-                        if not frag["name"] or name != frag["name"]:
+                        # chunks, or repeat it whole on every argument chunk.
+                        # Match fragments by prefix so all three reassemble
+                        # correctly: a fragment that extends what we already hold
+                        # (a growing prefix or the repeated whole name) replaces
+                        # it; a disjoint fragment (a split) is appended.
+                        if not frag["name"]:
+                            frag["name"] = name
+                        elif name.startswith(frag["name"]):
+                            frag["name"] = name
+                        else:
                             frag["name"] += name
                     arguments = getattr(fn, "arguments", None)
                     if arguments:
@@ -276,7 +303,11 @@ class LiteLLMProvider(LLM):
         )
 
     def count_tokens(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> ContextWindowUsage:
-        """Count tokens using litellm.token_counter."""
+        """使用 litellm.token_counter 统计 token 数量。
+
+        这是粗略估算回退（约每 token 4 个字符）的唯一位置，
+        调用方不得重复实现。
+        """
         import litellm
 
         try:
@@ -287,10 +318,12 @@ class LiteLLMProvider(LLM):
             import json
 
             text = json.dumps(messages, default=str)
+            if tools:
+                text += json.dumps(tools, default=str)
             return ContextWindowUsage(total_tokens=len(text) // 4)
 
     def get_context_window_size(self) -> int:
-        """Return the context window size for the model."""
+        """返回该模型的上下文窗口大小。"""
         # Common defaults
         context_windows: Dict[str, int] = {
             "gpt-4o": 128000,
@@ -310,5 +343,5 @@ class LiteLLMProvider(LLM):
         return 128000  # Default
 
     def get_maximum_output_token(self) -> int:
-        """Return the maximum output tokens for the model."""
+        """返回该模型的最大输出 token 数。"""
         return 4096  # Common default

@@ -1,10 +1,17 @@
-"""Shared CLI option definitions.
+"""共享的 CLI 选项定义。
 
-Options that appear in multiple commands are defined once here and reused,
-following the HolmesGPT cli_commons pattern. The defaults for options that
-are also in the config file MUST be None, or the CLI defaults will override
-settings in the config file.
+出现在多个命令中的选项在此定义一次并复用，
+遵循 HolmesGPT 的 cli_commons 模式。同时存在于配置文件中的选项，
+其默认值必须为 None，否则 CLI 默认值会覆盖配置文件中的设置。
 """
+
+# ======================= 中文导览 =======================
+# 跨命令复用的 Typer 选项定义（CLI 参数 → Config 装配的入口之一）。
+# opt_* 一批：--api-key / --model / --base-url / --config / --max-steps / --verbose / --no-compaction / --json-output-file。
+# 铁律：凡也存在于 config 文件的选项，默认值【必须是 None】——
+#   CLI 非空值才覆盖配置文件，否则 CLI 默认值会压掉配置（见 agent/main.py 装配）。
+# 数据流：CLI 键入 → opt_* 变量 → Config 构造函数 → create_llm / create_tool_calling_llm。
+# =========================================================
 
 from pathlib import Path
 from typing import List, Optional

@@ -1,6 +1,19 @@
-"""Tool registration, lookup, and execution engine."""
+"""工具注册、查找与执行引擎。"""
+
+
+# ======================= 中文导览 =======================
+# 本文件是「工具注册中心 + 分发器」（行为对象）：
+#   ToolExecutor —— 输入(工具名 + params + ToolInvokeContext) → 输出(ToolCallResult)。
+# 干了四件事：
+#   ① 注册：把各 Toolset 里的 Tool 建成 name→Tool 索引（并反向建 tool→toolset 索引）
+#   ② 懒加载：首次用到某工具才 check 其 toolset 前置条件，不达标 mark_failed() 并重建索引
+#   ③ tag 过滤：按运行模式裁剪工具集（CLI 只装 CORE+CLI，server 装 CORE+CLUSTER）
+#   ④ 名字冲突解决：MCP 工具自动加 {toolset}__{tool} 前缀
+# =========================================================
+
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from agent.core.models import (
@@ -14,14 +27,18 @@ from agent.core.tools import Tool, Toolset, ToolsetStatusEnum, ToolsetTag, Tools
 logger = logging.getLogger(__name__)
 
 
+# ---- 行为对象：工具注册中心 + 分发器 ----
+# 输入：工具名 + 参数 + ToolInvokeContext；输出：ToolCallResult（外包一层，附耗时/tool_call_id）。
+# 设计要点：除了执行，还负责 ①建索引 ②懒初始化 ③tag过滤 ④MCP 名字前缀去冲突。
+#          它【不】关心工具内部逻辑，只做「按名找到 Tool → 用你的 context 调 .invoke() → 包结果」。
 class ToolExecutor:
-    """Manages tool registration, lookup, lazy initialization, and execution.
+    """管理工具的注册、查找、懒初始化与执行。
 
-    Supports:
-    - Multiple toolset types (YAML, PYTHON, HTTP, MCP)
-    - Lazy toolset initialization (prerequisites checked on first use)
-    - Name conflict resolution (MCP tools get {toolset}__{tool} prefix)
-    - Tag-based toolset filtering (toolset_tag_filter)
+    支持：
+    - 多种工具集类型（YAML、PYTHON、HTTP、MCP）
+    - 工具集懒初始化（首次使用时才检查前置条件）
+    - 名字冲突解决（MCP 工具自动加 {toolset}__{tool} 前缀）
+    - 基于标签的工具集过滤（toolset_tag_filter）
     """
 
     def __init__(
@@ -29,29 +46,29 @@ class ToolExecutor:
         toolsets: Optional[List[Toolset]] = None,
         toolset_tag_filter: Optional[List[ToolsetTag]] = None,
     ):
-        """Initialize the ToolExecutor.
+        """初始化 ToolExecutor。
 
-        Args:
-            toolsets: Initial list of toolsets to register.
-            toolset_tag_filter: If provided, only load toolsets that have at least
-                one matching tag. None means no filtering (load all enabled toolsets).
-                Example: [ToolsetTag.CORE, ToolsetTag.CLI] for CLI mode,
-                [ToolsetTag.CORE, ToolsetTag.CLUSTER] for server mode.
+        参数:
+            toolsets: 要注册的初始工具对象集列表。
+            toolset_tag_filter: 若提供，则只加载至少含一个匹配标签的工具集。
+                None 表示不过滤（加载所有已启用的工具集）。
+                示例：CLI 模式用 [ToolsetTag.CORE, ToolsetTag.CLI]，
+                server 模式用 [ToolsetTag.CORE, ToolsetTag.CLUSTER]。
         """
         self.toolsets: List[Toolset] = toolsets or []
         self.toolset_tag_filter: Optional[List[ToolsetTag]] = toolset_tag_filter
         self.enabled_toolsets: List[Toolset] = []
-        self.tools_by_name: Dict[str, Tool] = {}
+        self.tools_by_name: Dict[str, Tool] = {} # key是工具名，value 对应的工具对象
         self._tool_to_toolset: Dict[str, Toolset] = {}
         self._initialized_toolsets: set = set()
         self._build_index()
 
     def _build_index(self) -> None:
-        """Rebuild the tool name index from all enabled toolsets.
+        """根据所有已启用的工具集重建工具名索引。
 
-        Filters toolsets by status (ENABLED) and, if toolset_tag_filter is set,
-        by tags. A toolset must have at least one matching tag to pass the filter.
-        Toolsets with no tags are excluded when a filter is active.
+        按状态（ENABLED）过滤工具集；若设置了 toolset_tag_filter，则再按标签过滤。
+        工具集必须至少含一个匹配标签才能通过过滤。
+        启用过滤时，不带标签的工具集会被排除。
         """
         self.tools_by_name.clear()
         self._tool_to_toolset.clear()
@@ -104,24 +121,29 @@ class ToolExecutor:
         )
 
     def _resolve_tool_name(self, tool_name: str, toolset: Toolset) -> str:
-        """Resolve tool name, adding MCP prefix to avoid conflicts."""
+        """解析工具名，为 MCP 工具加前缀以避免冲突。"""
         if toolset.type == ToolsetType.MCP:
             return f"{toolset.name}__{tool_name}"
         return tool_name
 
     def get_tool_by_name(self, name: str) -> Optional[Tool]:
-        """Look up a tool by name. Returns None if not found."""
+        """按名称查找工具。未找到时返回 None。"""
         return self.tools_by_name.get(name)
 
     def get_toolset_name(self, tool_name: str) -> Optional[str]:
-        """Get the toolset name that owns a given tool."""
-        toolset = self._tool_to_toolset.get(tool_name)
+        """获取拥有指定工具的工具集名称。"""
+        toolset = self.get_toolset_for(tool_name)
         return toolset.name if toolset else None
 
-    def ensure_toolset_initialized(self, tool_name: str) -> Optional[str]:
-        """Lazy-initialize the toolset for a tool name.
+    def get_toolset_for(self, tool_name: str) -> Optional[Toolset]:
+        """获取拥有指定工具的 Toolset 实例（公开访问器）。"""
+        return self._tool_to_toolset.get(tool_name)
 
-        Returns an error message if initialization fails, or None on success.
+    # 懒初始化：首次用到某工具时检查其 toolset 前置条件，失败则 mark_failed + 重建索引。
+    def ensure_toolset_initialized(self, tool_name: str) -> Optional[str]:
+        """为指定工具名懒初始化其所属的工具集。
+
+        初始化失败时返回错误信息，成功时返回 None。
         """
         toolset = self._tool_to_toolset.get(tool_name)
         if not toolset:
@@ -138,6 +160,7 @@ class ToolExecutor:
         self._initialized_toolsets.add(toolset.name)
         return None
 
+    # 核心入口：按名找到 Tool，调 .invoke()，再用计时包成 ToolCallResult 返回。
     def execute_tool(
         self,
         tool_name: str,
@@ -145,19 +168,17 @@ class ToolExecutor:
         context: Any,
         tool_call_id: str = "",
     ) -> ToolCallResult:
-        """Execute a tool by name and return a ToolCallResult.
+        """按名称执行工具并返回 ToolCallResult。
 
-        Args:
-            tool_name: Name of the tool to execute.
-            params: Parameters to pass to the tool.
-            context: ToolInvokeContext (or compatible) with user_approved, etc.
-            tool_call_id: ID of the LLM tool call for correlation.
+        参数:
+            tool_name: 要执行的工具名称。
+            params: 传给工具的参数。
+            context: ToolInvokeContext（或兼容对象），包含 user_approved 等字段。
+            tool_call_id: LLM 工具调用的 ID，用于关联。
 
-        Returns:
-            ToolCallResult wrapping the StructuredToolResult.
+        返回:
+            包装了 StructuredToolResult 的 ToolCallResult。
         """
-        import time
-
         start = time.time()
 
         tool = self.get_tool_by_name(tool_name)
@@ -182,10 +203,10 @@ class ToolExecutor:
         )
 
     def get_tools_as_openai(self) -> List[Dict[str, Any]]:
-        """Get all registered tools in OpenAI-compatible format."""
+        """以 OpenAI 兼容格式获取所有已注册的工具。"""
         return [tool.to_openai_tool() for tool in self.tools_by_name.values()]
 
     def add_toolset(self, toolset: Toolset) -> None:
-        """Register a new toolset and rebuild the index."""
+        """注册新的工具集并重建索引。"""
         self.toolsets.append(toolset)
         self._build_index()

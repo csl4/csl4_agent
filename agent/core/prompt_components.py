@@ -1,15 +1,24 @@
-"""Prompt component definitions — enum, defaults, and assembly order."""
+"""提示词组件定义 —— 枚举、默认值和组装顺序。"""
+
+
+# ======================= 中文导览 =======================
+# 本文件定义系统提示词的「零件清单」：
+#   PromptComponent      → 8 个组件的枚举（每个独立可开关/覆盖）
+#   PROMPT_COMPONENT_ORDER → 拼装顺序（越靠前的组件在 prompt 里越靠上）
+#   DEFAULT_PROMPT_COMPONENTS → 各组件默认文本（开箱即用，可被 custom_components 覆盖）
+# 与 prompt.py 配合：这里定义「有哪些零件+顺序+默认值」，prompt.py 负责按顺序组装。
+# =========================================================
 
 from enum import Enum
 from typing import Dict, List
 
 
 class PromptComponent(str, Enum):
-    """System prompt components, each independently toggleable via behavior_controls.
+    """系统提示词组件，每个均可通过 behavior_controls 独立开关。
 
-    Different deployment scenarios include different components:
-    - CLI mode: typically includes INTRO, TOOLSET_INSTRUCTIONS, GENERAL_INSTRUCTIONS
-    - Server mode: may add TODOWRITE_INSTRUCTIONS, PERMISSION_ERRORS, STYLE_GUIDE
+    不同的部署场景包含不同的组件：
+    - CLI 模式：通常包含 INTRO、TOOLSET_INSTRUCTIONS、GENERAL_INSTRUCTIONS
+    - Server 模式：可能额外加入 TODOWRITE_INSTRUCTIONS、PERMISSION_ERRORS、STYLE_GUIDE
     """
 
     INTRO = "intro"

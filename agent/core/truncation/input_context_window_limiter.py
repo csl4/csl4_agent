@@ -1,7 +1,6 @@
-"""Context window limiter — checks if compaction is needed.
+"""上下文窗口限制器 —— 检查是否需要压缩。
 
-Monitors the current token usage and triggers compaction when the
-conversation approaches the model's context window limit.
+监控当前 token 用量，当对话接近模型的上下文窗口上限时触发压缩。
 """
 
 import logging
@@ -10,12 +9,15 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+# ---- 行为对象：上下文窗口「体检器」----
+# 输入：messages(+tools)；输出：布尔——是否已逼近上下文上限、需要触发压缩。
+# 设计要点：token 估算统一委托给 LLM.count_tokens()（那里持有 ~4 字符/token 的兜底），
+#           本类不再重复实现；超阈值比(默认0.75)即触发 compaction。
 class ContextWindowLimiter:
-    """Checks whether the conversation is approaching the context window limit.
+    """检查对话是否已接近上下文窗口上限。
 
-    Uses the LLM's token counting and context window size to determine
-    when compaction is needed. Triggers when the estimated token count
-    exceeds a configurable threshold ratio of the total window.
+    使用 LLM 的 token 计数和上下文窗口大小来判断
+    何时需要压缩。当估算的 token 数超过总窗口的可配置阈值比例时触发。
     """
 
     def __init__(
@@ -24,15 +26,15 @@ class ContextWindowLimiter:
         threshold_ratio: float = 0.75,
         min_messages_before_compact: int = 10,
     ):
-        """Initialize the limiter.
+        """初始化限制器。
 
-        Args:
-            llm: LLM instance (must have count_tokens() and
-                get_context_window_size() methods).
-            threshold_ratio: Token ratio (0.0–1.0) that triggers compaction.
-                Default 0.75 means compact when 75% of window is used.
-            min_messages_before_compact: Don't compact unless there are at
-                least this many messages (avoids compacting short conversations).
+        参数:
+            llm: LLM 实例（必须具有 count_tokens() 和
+                get_context_window_size() 方法）。
+            threshold_ratio: 触发压缩的 token 比例（0.0–1.0）。
+                默认 0.75 表示窗口用到 75% 时压缩。
+            min_messages_before_compact: 消息数量达到该值之前不压缩
+                （避免压缩过短的对话）。
         """
         self.llm = llm
         self.threshold_ratio = threshold_ratio
@@ -43,18 +45,18 @@ class ContextWindowLimiter:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        """Check if the conversation needs compaction.
+        """检查对话是否需要压缩。
 
-        Returns True if:
-        1. Message count exceeds min_messages_before_compact, AND
-        2. Estimated token count exceeds threshold_ratio * context_window_size.
+        在以下条件满足时返回 True：
+        1. 消息数量超过 min_messages_before_compact，且
+        2. 估算的 token 数超过 threshold_ratio * context_window_size。
 
-        Args:
-            messages: Current conversation messages.
-            tools: Optional tool definitions (also consume tokens).
+        参数:
+            messages: 当前的对话消息。
+            tools: 可选的工具定义（同样会消耗 token）。
 
-        Returns:
-            True if compaction is needed.
+        返回:
+            如果需要压缩则返回 True。
         """
         # Don't compact short conversations
         if len(messages) < self.min_messages_before_compact:
@@ -83,7 +85,7 @@ class ContextWindowLimiter:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        """Alias for check_compaction_needed()."""
+        """check_compaction_needed() 的别名。"""
         return self.check_compaction_needed(messages, tools)
 
     def _estimate_tokens(
@@ -91,40 +93,35 @@ class ContextWindowLimiter:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
-        """Estimate the total token count for the current messages and tools.
+        """估算当前消息和工具的 token 总数。
 
-        Args:
-            messages: Current conversation messages.
-            tools: Optional tool definitions.
+        完全委托给 LLM 的 count_tokens()，由其持有粗略估算的兜底逻辑。
+        任何异常都会向上抛给调用方，
+        由 check_compaction_needed()/get_usage_ratio() 应用各自的兜底方案。
 
-        Returns:
-            Estimated token count.
+        参数:
+            messages: 当前的对话消息。
+            tools: 可选的工具定义。
+
+        返回:
+            估算的 token 数量。
         """
-        try:
-            usage = self.llm.count_tokens(messages, tools)
-            return usage.total_tokens
-        except Exception:
-            # Rough fallback: ~4 chars per token
-            import json
-
-            text = json.dumps(messages, default=str)
-            if tools:
-                text += json.dumps(tools, default=str)
-            return len(text) // 4
+        usage = self.llm.count_tokens(messages, tools)
+        return usage.total_tokens
 
     def get_usage_ratio(
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> float:
-        """Get the current token usage ratio (0.0–1.0).
+        """获取当前的 token 使用比例（0.0–1.0）。
 
-        Args:
-            messages: Current conversation messages.
-            tools: Optional tool definitions.
+        参数:
+            messages: 当前的对话消息。
+            tools: 可选的工具定义。
 
-        Returns:
-            Token usage ratio.
+        返回:
+            token 使用比例。
         """
         try:
             current = self._estimate_tokens(messages, tools)

@@ -1,4 +1,13 @@
-"""Built-in tool result transformers."""
+"""内置的工具结果变换器。"""
+
+
+# ======================= 中文导览 =======================
+# 内置的 Transformer 实现：挂到 Tool.transformers 上，在工具成功后自动应用，
+#   防止超大结果把上下文撑爆。
+#   JsonTruncationTransformer → 对 JSON 数据，超限时截断 list/dict（保留前 N 项并加截断说明）。
+#   LineCountTransformer       → 对文本数据，超过 max_lines 行时截断并加说明。
+# 设计要点：这是「结果瘦身」这类横切关注点与工具逻辑解耦的落地样例。
+# =========================================================
 
 import json
 import logging
@@ -11,11 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 class JsonTruncationTransformer(Transformer):
-    """Truncates large JSON tool results to fit within token limits.
+    """截断过大的 JSON 工具结果，使其适配 token 限制。
 
-    When a tool result's JSON data exceeds max_tokens, this transformer
-    truncates it by keeping only the first N items (for lists) or
-    the first N keys (for dicts), and adds a truncation notice.
+    当工具结果的 JSON 数据超过 max_tokens 时，本变换器会进行截断：
+    对于 list 仅保留前 N 项，对于 dict 仅保留前 N 个键，并附加截断说明。
     """
 
     max_tokens: int = 4000
@@ -23,13 +31,13 @@ class JsonTruncationTransformer(Transformer):
     max_dict_keys: int = 30
 
     def transform(self, result: StructuredToolResult) -> StructuredToolResult:
-        """Truncate the result data if it's too large.
+        """若结果数据过大则进行截断。
 
-        Args:
-            result: The tool result to transform.
+        参数:
+            result: 要变换的工具结果。
 
-        Returns:
-            Transformed result with truncated data if needed.
+        返回:
+            变换后的结果，必要时包含被截断的数据。
         """
         if result.status != StructuredToolResultStatus.SUCCESS:
             return result
@@ -59,13 +67,13 @@ class JsonTruncationTransformer(Transformer):
             return result
 
     def _truncate_data(self, data: Any) -> Any:
-        """Truncate data to fit within max_tokens.
+        """截断数据以适配 max_tokens。
 
-        Args:
-            data: The data to truncate (dict, list, or scalar).
+        参数:
+            data: 要截断的数据（dict、list 或标量）。
 
-        Returns:
-            Truncated data with a truncation notice.
+        返回:
+            截断后的数据，附截断说明。
         """
         if isinstance(data, list):
             if len(data) > self.max_list_items:
@@ -99,22 +107,21 @@ class JsonTruncationTransformer(Transformer):
 
 
 class LineCountTransformer(Transformer):
-    """Limits the number of lines in a text result.
+    """限制文本结果的行数。
 
-    When a tool result's text output exceeds max_lines, this transformer
-    truncates it and adds a truncation notice.
+    当工具结果的文本输出超过 max_lines 时，本变换器会进行截断并附加截断说明。
     """
 
     max_lines: int = 200
 
     def transform(self, result: StructuredToolResult) -> StructuredToolResult:
-        """Truncate text result if it exceeds max_lines.
+        """若文本结果超过 max_lines 则进行截断。
 
-        Args:
-            result: The tool result to transform.
+        参数:
+            result: 要变换的工具结果。
 
-        Returns:
-            Transformed result with truncated text if needed.
+        返回:
+            变换后的结果，必要时包含被截断的文本。
         """
         if result.status != StructuredToolResultStatus.SUCCESS:
             return result

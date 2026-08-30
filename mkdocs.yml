@@ -3,8 +3,8 @@
 # 完整版参考 HolmesGPT 的 mkdocs.yml
 # ============================================================
 
-site_name: YOUR_PROJECT_NAME
-site_description: YOUR_PROJECT_DESCRIPTION
+site_name: Agent
+site_description: General-purpose LLM Agent framework
 site_url: https://example.com/
 repo_url: https://github.com/YOUR_ORG/YOUR_REPO
 repo_name: YOUR_ORG/YOUR_REPO
@@ -14,6 +14,7 @@ edit_uri: edit/master/docs/
 # 方式 B: 不用 awesome-nav → 在这里写完整导航
 nav:
     - Home: index.md
+    - 系统架构: architecture.md
 
 theme:
     name: material
@@ -77,7 +78,11 @@ markdown_extensions:
     - pymdownx.keys
     - pymdownx.mark
     - pymdownx.smartsymbols
-    - pymdownx.superfences
+    - pymdownx.superfences:
+          custom_fences:
+              - name: mermaid
+                class: mermaid
+                format: !!python/name:pymdownx.superfences.fence_code_format
     - pymdownx.tabbed:
           alternate_style: true
           combine_header_slug: true
@@ -90,3 +95,7 @@ markdown_extensions:
 
 extra_css:
     - stylesheets/extra.css
+
+extra_javascript:
+    - https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js
+    - javascripts/mermaid-init.js

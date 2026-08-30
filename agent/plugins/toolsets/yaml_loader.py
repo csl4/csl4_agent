@@ -1,6 +1,6 @@
-"""YAML toolset loader — loads toolset definitions from YAML files.
+"""YAML 工具集加载器——从 YAML 文件加载工具集定义。
 
-Supports the YAML toolset format:
+支持 YAML 工具集格式:
     name: my_toolset
     description: My toolset
     type: YAML
@@ -15,9 +15,16 @@ Supports the YAML toolset format:
             required: true
         command: "{{ command }}"
 
-Parameters are sanitized via shlex.quote() before being inserted into
-Jinja2 command templates.
+参数在插入 Jinja2 命令模板之前会通过 shlex.quote() 进行净化处理。
 """
+
+# ======================= 中文导览 =======================
+# YAML 工具集加载器：把 *.yaml 文件里声明的命令模板工具，加载成 Toolset。
+#   YamlTool → 一种「命令模板工具」：参数经 shlex.quote() 安全转义后，塞进 Jinja2 模板渲染成命令字符串。
+#   load_yaml_toolsets(dir) → 扫描目录内 *.yaml/*.yml，逐个解析成 Toolset。
+# 设计要点：与 Python 工具(list_directory 等)走【同一套 Tool.invoke() 模板方法】——
+#           只是 _invoke() 被实现成「渲染命令模板」。所以 YAML 工具也能享受审批/强转/transformer。
+# =========================================================
 
 import logging
 import shlex
@@ -38,10 +45,13 @@ from agent.core.models import (
 logger = logging.getLogger(__name__)
 
 
+# ---- 行为对象：YAML 命令模板工具 ----
+# 输入：params（已被基类强转）+ context；输出：StructuredToolResult（含渲染好的 command 字符串）。
+# 设计要点：_invoke() 用 shlex.quote() 转义每个参数防 shell 注入，再渲染 Jinja2 模板。
 class YamlTool(Tool):
-    """A tool defined in a YAML toolset file.
+    """定义在 YAML 工具集文件中的工具。
 
-    Executes a Jinja2 command template with sanitized parameters.
+    用净化后的参数执行 Jinja2 命令模板。
     """
 
     command_template: str = ""
@@ -49,14 +59,14 @@ class YamlTool(Tool):
     def _invoke(
         self, params: Dict[str, Any], context: ToolInvokeContext
     ) -> StructuredToolResult:
-        """Render the command template with sanitized parameters.
+        """用净化后的参数渲染命令模板。
 
-        Args:
-            params: Tool parameters (already type-coerced by Tool.invoke()).
-            context: Tool invocation context.
+        参数:
+            params: 工具参数（已由 Tool.invoke() 完成类型强转）。
+            context: 工具调用上下文。
 
-        Returns:
-            StructuredToolResult with the rendered command string.
+        返回:
+            携带渲染后命令字符串的 StructuredToolResult。
         """
         # Sanitize parameters with shlex.quote() for shell safety
         sanitized: Dict[str, str] = {}
@@ -80,13 +90,13 @@ class YamlTool(Tool):
 
 
 def _parse_tool_parameter(param_def: Dict[str, Any]) -> ToolParameter:
-    """Parse a tool parameter definition from YAML.
+    """解析来自 YAML 的工具参数定义。
 
-    Args:
-        param_def: Parameter definition dict from YAML.
+    参数:
+        param_def: 来自 YAML 的参数定义字典。
 
-    Returns:
-        ToolParameter instance.
+    返回:
+        ToolParameter 实例。
     """
     return ToolParameter(
         type=param_def.get("type", "string"),
@@ -98,13 +108,13 @@ def _parse_tool_parameter(param_def: Dict[str, Any]) -> ToolParameter:
 
 
 def _parse_tool(tool_def: Dict[str, Any]) -> YamlTool:
-    """Parse a single tool definition from YAML.
+    """解析来自 YAML 的单个工具定义。
 
-    Args:
-        tool_def: Tool definition dict from YAML.
+    参数:
+        tool_def: 来自 YAML 的工具定义字典。
 
-    Returns:
-        YamlTool instance.
+    返回:
+        YamlTool 实例。
     """
     parameters: Dict[str, ToolParameter] = {}
     for name, param_def in tool_def.get("parameters", {}).items():
@@ -119,13 +129,13 @@ def _parse_tool(tool_def: Dict[str, Any]) -> YamlTool:
 
 
 def load_yaml_toolset(file_path: Path) -> Optional[Toolset]:
-    """Load a toolset from a YAML file.
+    """从 YAML 文件加载工具集。
 
-    Args:
-        file_path: Path to the YAML file.
+    参数:
+        file_path: YAML 文件的路径。
 
-    Returns:
-        Toolset instance, or None if loading fails.
+    返回:
+        Toolset 实例，加载失败时返回 None。
     """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -171,15 +181,15 @@ def load_yaml_toolset(file_path: Path) -> Optional[Toolset]:
 
 
 def load_yaml_toolsets(directory: Path) -> List[Toolset]:
-    """Load all YAML toolsets from a directory.
+    """从目录中加载所有 YAML 工具集。
 
-    Scans for *.yaml and *.yml files in the given directory.
+    扫描给定目录中的 *.yaml 和 *.yml 文件。
 
-    Args:
-        directory: Path to the directory containing YAML toolset files.
+    参数:
+        directory: 包含 YAML 工具集文件的目录路径。
 
-    Returns:
-        List of loaded Toolset instances.
+    返回:
+        已加载的 Toolset 实例列表。
     """
     if not directory.exists():
         logger.debug(f"YAML toolset directory not found: {directory}")

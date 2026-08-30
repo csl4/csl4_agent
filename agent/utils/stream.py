@@ -1,5 +1,16 @@
-"""SSE (Server-Sent Events) stream message definitions for the agent loop."""
+"""供 agent 主循环使用的 SSE（Server-Sent Events）流消息定义。"""
 
+
+# ======================= 中文导览 =======================
+# 本文件定义主循环对外的【事件协议】：
+#   StreamEvents  → 事件枚举：ANSWER_DELTA(打字机式吐字) / START_TOOL / TOOL_RESULT /
+#                    ANSWER_END(最终答案) / APPROVAL_REQUIRED(审批暂停) / FRONTEND_PAUSE /
+#                    COMPACTION_START / COMPACTED / ERROR 等。
+#   StreamMessage → 单个事件，带 to_sse() 转成 SSE 文本 `event:xxx\ndata:{json}\n\n`。
+# 数据流位置：ToolCallingLLM.call_stream() 逐个 yield StreamMessage；前端据此渲染/cli据此 print。
+# =========================================================
+
+import json
 from enum import Enum
 from typing import Any, Dict
 
@@ -7,7 +18,7 @@ from pydantic import BaseModel
 
 
 class StreamEvents(str, Enum):
-    """Event types emitted during the agent loop."""
+    """agent 主循环期间发出的事件类型。"""
 
     ANSWER_DELTA = "ai_answer_delta"
     ANSWER_END = "ai_answer_end"
@@ -23,9 +34,9 @@ class StreamEvents(str, Enum):
 
 
 class StreamMessage(BaseModel):
-    """A single SSE-formatted message emitted by the agent loop.
+    """agent 主循环发出的单条 SSE 格式消息。
 
-    Example SSE format:
+    示例 SSE 格式：
         event: {event}\n
         data: {json}\n\n
     """
@@ -34,7 +45,5 @@ class StreamMessage(BaseModel):
     data: Dict[str, Any] = {}
 
     def to_sse(self) -> str:
-        """Format as SSE string."""
-        import json
-
+        """格式化为 SSE 字符串。"""
         return f"event: {self.event.value}\ndata: {json.dumps(self.data, default=str)}\n\n"
