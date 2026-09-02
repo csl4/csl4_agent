@@ -93,27 +93,6 @@ def _log_level_for_verbosity(verbose: Optional[List[bool]]) -> Optional[str]:
     return None
 
 
-def _apply_overrides(
-    config: Config,
-    api_key: Optional[str],
-    model: Optional[str],
-    base_url: Optional[str],
-    max_steps: Optional[int],
-    no_compaction: bool,
-) -> None:
-    """将 CLI 选项的覆盖值应用到已加载的配置上。"""
-    if api_key:
-        config.data["llm"]["api_key"] = api_key
-    if model:
-        config.data["llm"]["model"] = model
-    if base_url:
-        config.data["llm"]["base_url"] = base_url
-    if max_steps:
-        config.data["agent"]["max_steps"] = max_steps
-    if no_compaction:
-        config.data["agent"]["enable_compaction"] = False
-
-
 def _create_agent(config: Config):
     """根据配置创建 LLM、工具执行器和 agent。"""
     llm = config.create_llm()
@@ -474,7 +453,13 @@ def run(
     # CLI 模式：加载 CLI 已批准的 bash 前缀，让此前的审批在这里也生效
     enable_cli_mode()
     config = Config(config_path=config_file)
-    _apply_overrides(config, api_key, model, base_url, max_steps, no_compaction)
+    config.apply_overrides(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        max_steps=max_steps,
+        no_compaction=no_compaction,
+    )
 
     # 提示词优先级：prompt_file > 管道 stdin > 位置参数 prompt
     piped_data = read_piped_input()
@@ -603,7 +588,13 @@ def chat(
     # CLI 模式：从 ~/.agent/bash_approved_prefixes.yaml 加载 CLI 已批准的 bash 前缀
     enable_cli_mode()
     config = Config(config_path=config_file)
-    _apply_overrides(config, api_key, model, base_url, max_steps, no_compaction)
+    config.apply_overrides(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        max_steps=max_steps,
+        no_compaction=no_compaction,
+    )
 
     if multi_agent:
         main_agent = _create_multi_agent(config)

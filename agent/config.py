@@ -9,7 +9,8 @@
 # 设计理念：
 #   ① 依赖是「构造函数注入」，不内部 new —— main.py 从这里拿拼好的对象。
 #   ② 工具集多元化：内置 Python 模块 + YAML 模板文件都能注册进同一 ToolExecutor。
-#   ③ 配置三层覆盖：默认值 → YAML 文件 → 环境变量（_deep_merge）。
+#   ③ 配置四层覆盖（优先级从低到高）：默认值 → YAML 文件 → 环境变量
+#      （_ENV_OVERRIDES 声明式表）→ CLI 覆盖（Config.apply_overrides）。
 # =========================================================
 
 
@@ -17,7 +18,7 @@ import copy
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -67,8 +68,45 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
+def _env_str(raw: str, current: Any) -> Any:
+    """字符串环境变量：原样返回（占位转换器，统一表项签名）。"""
+    return raw
+
+
+def _env_bool(raw: str, current: Any) -> Any:
+    """把环境变量字符串解析为布尔；空串/非法值回退当前值。"""
+    if raw is None or raw == "":
+        return current
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(raw: str, current: Any) -> Any:
+    """把环境变量字符串解析为整数；非法值回退当前值并给出警告。"""
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            f"Environment variable value {raw!r} is not an integer; "
+            f"using current value {current!r}."
+        )
+        return current
+
+
+# 环境变量覆盖层（第三层：默认值 ← YAML ← 环境变量 ← CLI）。
+# 每项: (配置点路径, 环境变量名或元组, 转换器)。环境变量名用元组时按顺序取
+# 第一个已设置的（兼容回退，如 OPENAI_API_KEY）。转换器签名: (raw, current) -> value。
+_ENV_OVERRIDES: List[Tuple[str, Any, Callable[[str, Any], Any]]] = [
+    ("llm.model", "AGENT_MODEL", _env_str),
+    ("llm.api_key", ("AGENT_API_KEY", "OPENAI_API_KEY"), _env_str),
+    ("llm.base_url", "AGENT_BASE_URL", _env_str),
+    ("agent.max_steps", "AGENT_MAX_STEPS", _env_int),
+    ("multi_agent.enabled", "AGENT_MULTI_AGENT", _env_bool),
+    ("multi_agent.max_subagents", "AGENT_MAX_SUBAGENTS", _env_int),
+]
+
+
 class Config:
-    """智能体配置，从 ~/.agent/config.yaml 加载，并支持环境变量覆盖。"""
+    """智能体配置：默认值 ← YAML（~/.agent/config.yaml）← 环境变量 ← CLI 覆盖。"""
 
     # ---- 装配工（composition root）----
 
@@ -93,21 +131,8 @@ class Config:
             except Exception as e:
                 logger.warning(f"Failed to load config from {self.config_path}: {e}")
 
-        # Environment variable overrides
-        config["llm"]["model"] = os.getenv("AGENT_MODEL", config["llm"]["model"])
-        config["llm"]["api_key"] = os.getenv(
-            "AGENT_API_KEY", os.getenv("OPENAI_API_KEY", config["llm"]["api_key"])
-        )
-        config["llm"]["base_url"] = os.getenv("AGENT_BASE_URL", config["llm"]["base_url"])
-        config["agent"]["max_steps"] = self._env_int(
-            "AGENT_MAX_STEPS", config["agent"]["max_steps"]
-        )
-        config["multi_agent"]["enabled"] = self._env_bool(
-            "AGENT_MULTI_AGENT", config["multi_agent"]["enabled"]
-        )
-        config["multi_agent"]["max_subagents"] = self._env_int(
-            "AGENT_MAX_SUBAGENTS", config["multi_agent"]["max_subagents"]
-        )
+        # Environment variable overrides（第三层，声明式表见 _ENV_OVERRIDES）
+        self._apply_env_overrides(config)
 
         # 沙箱配置：顶层 `sandbox:`（工具集工厂读取）与 `multi_agent.sandbox`
         # 合并，multi_agent.sandbox 优先（T025，contracts/config.md）。
@@ -115,31 +140,65 @@ class Config:
 
         return config
 
+    # ---- 覆盖层辅助（第三层环境变量 + 第四层 CLI）----
     @staticmethod
-    def _env_bool(name: str, default: bool) -> bool:
-        """读取布尔类型的环境变量；非法值回退默认并给出警告。"""
-        raw = os.getenv(name)
-        if raw is None or raw == "":
-            return default
-        return raw.strip().lower() in ("1", "true", "yes", "on")
+    def _get_dotted(config: Dict[str, Any], path: str) -> Any:
+        """按 `.` 分隔路径读取嵌套 dict 值（路径节点必须已存在）。"""
+        node = config
+        for part in path.split("."):
+            node = node[part]
+        return node
 
     @staticmethod
-    def _env_int(name: str, default: int) -> int:
-        """读取整数类型的环境变量；遇到非法值时回退到默认值并给出警告。"""
-        raw = os.getenv(name)
-        if raw is None or raw == "":
-            return default
-        try:
-            return int(raw)
-        except ValueError:
-            logger.warning(
-                f"Environment variable {name}={raw!r} is not an integer; "
-                f"using default {default}."
-            )
-            return default
+    def _set_dotted(config: Dict[str, Any], path: str, value: Any) -> None:
+        """按 `.` 分隔路径写入嵌套 dict 值（路径节点必须已存在）。"""
+        node = config
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node[part]
+        node[parts[-1]] = value
 
     @staticmethod
-    # 三层覆盖核心：默认值 ← 被 YAML 用户配置覆盖 ← 被环境变量覆盖。
+    def _apply_env_overrides(config: Dict[str, Any]) -> None:
+        """应用环境变量覆盖层（第三层）：遍历 _ENV_OVERRIDES 声明式表。
+
+        取每个配置点第一个已设置的环境变量（空串视为已设置），经转换器
+        落到对应路径；未设置则跳过，保持默认/YAML 值。
+        """
+        for path, env_names, converter in _ENV_OVERRIDES:
+            names = env_names if isinstance(env_names, tuple) else (env_names,)
+            raw = next((os.getenv(n) for n in names if os.getenv(n) is not None), None)
+            if raw is None:
+                continue
+            current = Config._get_dotted(config, path)
+            Config._set_dotted(config, path, converter(raw, current))
+
+    def apply_overrides(
+        self,
+        *,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        max_steps: Optional[int] = None,
+        no_compaction: bool = False,
+    ) -> None:
+        """应用 CLI 覆盖层（最高优先级：默认值 ← YAML ← 环境变量 ← CLI）。
+
+        仅在参数非空时覆盖对应配置（None/空串不覆盖，保持已有值）。
+        """
+        if api_key:
+            self.data["llm"]["api_key"] = api_key
+        if model:
+            self.data["llm"]["model"] = model
+        if base_url:
+            self.data["llm"]["base_url"] = base_url
+        if max_steps:
+            self.data["agent"]["max_steps"] = max_steps
+        if no_compaction:
+            self.data["agent"]["enable_compaction"] = False
+
+    @staticmethod
+    # 覆盖层核心：默认值 ← YAML 用户配置 ← 环境变量 ← CLI。
     def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> None:
         """将 override 递归合并到 base 中。"""
         for key, value in override.items():

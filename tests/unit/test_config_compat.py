@@ -106,3 +106,64 @@ class TestSandboxConfig:
         settings = config.sandbox_settings()
         assert settings["type"] == "lightweight"
         assert settings["timeout_seconds"] == 30
+
+
+class TestApplyOverrides:
+    """CLI 覆盖层（最高优先级）：Config.apply_overrides 行为。"""
+
+    def test_llm_overrides(self, tmp_path: Path) -> None:
+        config = Config(config_path=tmp_path / "missing.yaml")
+        config.apply_overrides(api_key="k", model="m", base_url="u")
+        assert config.data["llm"]["api_key"] == "k"
+        assert config.data["llm"]["model"] == "m"
+        assert config.data["llm"]["base_url"] == "u"
+
+    def test_agent_overrides(self, tmp_path: Path) -> None:
+        config = Config(config_path=tmp_path / "missing.yaml")
+        config.apply_overrides(max_steps=7, no_compaction=True)
+        assert config.data["agent"]["max_steps"] == 7
+        assert config.data["agent"]["enable_compaction"] is False
+
+    def test_no_args_keeps_defaults(self, tmp_path: Path) -> None:
+        config = Config(config_path=tmp_path / "missing.yaml")
+        before = dict(config.data["llm"])
+        config.apply_overrides()
+        assert config.data["llm"] == before
+        assert config.data["agent"]["enable_compaction"] is True
+
+    def test_cli_overrides_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """四层优先级：CLI > 环境变量 > YAML > 默认值。"""
+        monkeypatch.setenv("AGENT_MODEL", "env-model")
+        config = Config(config_path=tmp_path / "missing.yaml")
+        assert config.data["llm"]["model"] == "env-model"
+        config.apply_overrides(model="cli-model")
+        assert config.data["llm"]["model"] == "cli-model"
+
+
+class TestEnvOverrides:
+    """环境变量覆盖层（第三层）：声明式表 _ENV_OVERRIDES 回归。"""
+
+    def test_model_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENT_MODEL", "env-model")
+        config = Config(config_path=tmp_path / "missing.yaml")
+        assert config.data["llm"]["model"] == "env-model"
+
+    def test_api_key_env_prefers_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENT_API_KEY", "agent-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+        config = Config(config_path=tmp_path / "missing.yaml")
+        assert config.data["llm"]["api_key"] == "agent-key"
+
+    def test_api_key_env_falls_back_openai(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+        config = Config(config_path=tmp_path / "missing.yaml")
+        assert config.data["llm"]["api_key"] == "openai-key"
