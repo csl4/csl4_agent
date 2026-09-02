@@ -34,13 +34,14 @@ from agent.common.cli_commons import (
     opt_verbose,
 )
 from agent.config import Config
+from agent.core.agents import MainAgent, Orchestrator
+from agent.core.conversations import build_chat_messages
+from agent.core.tool_calling_llm import ToolCallingLLM
+from agent.core.tools import ToolsetTag
 from agent.plugins.toolsets.bash.common.cli_prefixes import (
     enable_cli_mode,
     save_cli_bash_tools_approved_prefixes,
 )
-from agent.core.conversations import build_chat_messages
-from agent.core.tool_calling_llm import ToolCallingLLM
-from agent.core.tools import ToolsetTag
 from agent.utils.console import (
     ElapsedSpinner,
     console,
@@ -72,7 +73,7 @@ app = typer.Typer(
 logger = logging.getLogger(__name__)
 
 # CLI 以单一本地身份运行
-CLI_TAG_FILTER = [ToolsetTag.CORE, ToolsetTag.CLI] # 标签 ["core","cil"]
+CLI_TAG_FILTER = [ToolsetTag.CORE, ToolsetTag.CLI]  # 标签 ["core","cli"]
 
 MUTED_STYLE = "bright_black"
 
@@ -121,15 +122,49 @@ def _create_agent(config: Config):
     return llm, tool_executor, agent
 
 
+def _create_multi_agent(config: Config) -> MainAgent:
+    """装配多Agent 编排链路（复用组合根：create_llm / create_tool_executor）。
+
+    主 Agent 包装现有 ToolCallingLLM（单 Agent 行为不变）；
+    编排 Agent 负责拆解 + 并行调度；命令子任务由动态 SubAgent 经
+    同一 ToolExecutor 执行（FR-001）。
+    """
+    settings = config.multi_agent_settings()
+    llm = config.create_llm()
+    orchestrator_llm = llm
+    if settings.get("orchestrator_model"):
+        orchestrator_llm = config.create_llm()
+        orchestrator_llm.model = settings["orchestrator_model"]
+    tool_executor = config.create_tool_executor(
+        toolset_tag_filter=CLI_TAG_FILTER,
+    )
+    tool_calling_llm = config.create_tool_calling_llm(
+        tool_executor=tool_executor,
+        llm=llm,
+    )
+    orchestrator = Orchestrator(
+        agent_id="orchestrator",
+        llm=orchestrator_llm,
+        tool_executor=tool_executor,
+        max_subagents=settings.get("max_subagents", 4),
+    )
+    return MainAgent(
+        agent_id="main",
+        tool_calling_llm=tool_calling_llm,
+        orchestrator=orchestrator,
+        llm=llm,
+    )
+
+
 def _append_tool_result(
-    history: List[Dict[str, Any]],
+    session_history: List[Dict[str, Any]],
     tool_call_id: str,
     tool_name: str,
     content: str,
 ) -> List[Dict[str, Any]]:
     """追加一条合成的工具结果，使未完成的 assistant tool_calls
     消息得到应答，并保证消息顺序对 LLM API 仍然有效。"""
-    amended = list(history)
+    amended = list(session_history)
     amended.append(
         {
             "role": "tool",
@@ -147,6 +182,7 @@ def _consume_stream(
     tool_decisions: Dict[str, bool],
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """执行一次 call_stream 遍历，边接收事件边打印。
+    对于返回数据的处理 也是agent生成器 消费器
 
     返回:
         (final, pause)：final 是回合完成时的 ANSWER_END 数据；
@@ -179,7 +215,7 @@ def _consume_stream(
     spinner.start()
 
     try:
-        for event in agent.call_stream(
+        for event in agent.call_stream( #  call_stream消费生成器
             messages=messages,
             enable_tool_approval=True,
             tool_decisions=tool_decisions,
@@ -232,6 +268,21 @@ def _consume_stream(
                     "messages": event.data.get("messages") or list(messages),
                 }
                 return final, pause
+            elif event.event == StreamEvents.MULTI_AGENT_DECOMPOSE:
+                task = event.data.get("task", "")
+                ensure_spinner(f"编排拆解任务 … {task[:40]}")
+            elif event.event == StreamEvents.MULTI_AGENT_SUBAGENT:
+                # 多Agent 事件：SubAgent 启停/结果（T017 向后兼容新增）
+                stop_spinner()
+                print_tool_result(
+                    f"SubAgent[{event.data.get('worker', '?')}]",
+                    event.data.get("state", "?"),
+                    0.0,
+                    invocation=event.data.get("text"),
+                )
+                ensure_spinner("调度中 …")
+            elif event.event == StreamEvents.MULTI_AGENT_DONE:
+                ensure_spinner("多Agent 任务完成 …")
             elif event.event == StreamEvents.COMPACTION_START:
                 message_count = event.data.get("message_count")
                 ensure_spinner("正在压缩上下文 …")
@@ -256,31 +307,33 @@ def _consume_stream(
 
 def _run_turn(
     agent: ToolCallingLLM,
-    messages: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],  # 本轮请求的初始消息
     can_prompt: bool,
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """运行整个会话：循环消费流事件，途中解决审批/前端暂停。
 
     参数:
         agent: ToolCallingLLM 实例。
-        messages: 会话的初始消息。
+        messages: 本轮请求的初始消息。
         can_prompt: 是否可以向用户交互式询问决策。
 
     返回:
-        (final, history)：final 是 ANSWER_END 数据（若会话从未以答案结束则为 None）；
-        history 是到目前为止的对话。
+        (final, session_history)：final 是 ANSWER_END 数据（若会话从未以答案结束则为 None）；
+        session_history 是本次回合累积的会话消息（短期记忆）。
     """
     decisions: Dict[str, bool] = {}
-    working = list(messages)
+    # 短期记忆（session_history）：回合中不断累积的会话消息，随审批/前端暂停而更新。
+    # 工作记忆只指「单次 LLM 调用实际看到的窗口」，不是整个会话。
+    session_history = list(messages)
 
     while True:
-        final, pause = _consume_stream(agent, working, decisions)
+        final, pause = _consume_stream(agent, session_history, decisions)
 
         if pause is None:
-            history = final.get("messages") if final else working
-            return final,history
+            session_history = final.get("messages") if final else session_history
+            return final, session_history
 
-        working = pause["messages"]
+        session_history = pause["messages"]
 
         if pause["kind"] == "approval":
             # 对暂停批次里每一个需要审批的调用都弹一次提示
@@ -336,8 +389,8 @@ def _run_turn(
                 f"工具 '{pause['tool_name']}' 正在等待前端执行器，"
                 "但当前 CLI 没有前端，已中止该工具调用。"
             )
-            working = _append_tool_result(
-                working,
+            session_history = _append_tool_result(
+                session_history,
                 pause["tool_call_id"],
                 pause["tool_name"],
                 "Frontend execution is not available in this environment. "
@@ -403,7 +456,9 @@ def run(
     ),
 ) -> None:
     """提出一次性问题后退出（支持管道输入 stdin）。"""
-    setup_logging(_log_level_for_verbosity(verbose))
+    log_file = setup_logging(_log_level_for_verbosity(verbose), install_excepthook=True)
+    if log_file:
+        print_hint(f"日志文件: {log_file}")
     # CLI 模式：加载 CLI 已批准的 bash 前缀，让此前的审批在这里也生效
     enable_cli_mode()
     config = Config(config_path=config_file)
@@ -471,34 +526,16 @@ def run(
         raise typer.Exit(code=1)
 
 
-@app.command()
-def chat(
-    # 通用选项
-    api_key: Optional[str] = opt_api_key,
-    model: Optional[str] = opt_model,
-    base_url: Optional[str] = opt_base_url,
-    config_file: Optional[Path] = opt_config_file,
-    max_steps: Optional[int] = opt_max_steps,
-    verbose: Optional[List[bool]] = opt_verbose, #
-    no_compaction: bool = opt_no_compaction,
+def _chat_loop(
+    agent: Any,
+    toolsets: List[Any],
 ) -> None:
-    """与 agent 开始交互式聊天会话（默认命令）。"""
-    setup_logging(_log_level_for_verbosity(verbose))
-    # CLI 模式：从 ~/.agent/bash_approved_prefixes.yaml 加载 CLI 已批准的 bash 前缀
-    enable_cli_mode()
-    config = Config(config_path=config_file)
-    _apply_overrides(config, api_key, model, base_url, max_steps, no_compaction)
+    """交互式聊天主循环：每轮消费 agent.call_stream()（单/多Agent 通用）。
 
-    llm, tool_executor, agent = _create_agent(config) # 创建llm ,tool
-
-    print_banner(
-        model=llm.model,
-        tool_count=len(tool_executor.tools_by_name),
-        compaction_enabled=agent.enable_compaction,
-    )
-    print_hint("输入你的问题，'/exit' 或 Ctrl+C 退出。\n")
-
-    conversation_history: Optional[List[Dict[str, Any]]] = None
+    `agent` 可以是 ToolCallingLLM（单 Agent）或 MainAgent（多Agent 编排），
+    二者均实现同签名 call_stream()（宪法 II：CLI 只见 StreamMessage 事件流）。
+    """
+    session_history: Optional[List[Dict[str, Any]]] = None
 
     while True:
         try:
@@ -517,19 +554,81 @@ def chat(
 
         messages = build_chat_messages(
             ask=user_input,
-            conversation_history=conversation_history,
-            toolsets=tool_executor.enabled_toolsets,
+            session_history=session_history,
+            toolsets=toolsets,
         )
 
         try:
-            final, history = _run_turn(agent, messages, can_prompt=True) #
-            if history:
-                conversation_history = history
+            # 每轮回合结束，会话的短期记忆随返回的 session_history 更新
+            final, session_history = _run_turn(agent, messages, can_prompt=True)
         except KeyboardInterrupt:
             print_error("已中断。")
         except Exception as e:
             logger.debug("Agent turn failed", exc_info=True)
             print_error(f"Agent 回合失败: {e}")
+
+
+@app.command()
+def chat(
+    # 通用选项
+    api_key: Optional[str] = opt_api_key,
+    model: Optional[str] = opt_model,
+    base_url: Optional[str] = opt_base_url,
+    config_file: Optional[Path] = opt_config_file,
+    max_steps: Optional[int] = opt_max_steps,
+    verbose: Optional[List[bool]] = opt_verbose, #
+    no_compaction: bool = opt_no_compaction,
+    multi_agent: bool = typer.Option(
+        False,
+        "--multi-agent",
+        help="启用多Agent 编排模式（主/编排/业务/SubAgent 协作，contracts/cli.md）",
+    ),
+) -> None:
+    """与 agent 开始交互式聊天会话（默认命令）。"""
+    log_file = setup_logging(_log_level_for_verbosity(verbose), install_excepthook=True)
+    if log_file:
+        print_hint(f"日志文件: {log_file}")
+    # CLI 模式：从 ~/.agent/bash_approved_prefixes.yaml 加载 CLI 已批准的 bash 前缀
+    enable_cli_mode()
+    config = Config(config_path=config_file)
+    _apply_overrides(config, api_key, model, base_url, max_steps, no_compaction)
+
+    if multi_agent:
+        main_agent = _create_multi_agent(config)
+        tool_executor = (
+            main_agent.orchestrator.tool_executor
+            if main_agent.orchestrator is not None
+            else None
+        )
+        print_banner(
+            model=config.data["llm"]["model"],
+            tool_count=len(tool_executor.tools_by_name) if tool_executor else 0,
+            compaction_enabled=(
+                main_agent.tool_calling_llm.enable_compaction
+                if main_agent.tool_calling_llm
+                else False
+            ),
+        )
+        print_hint(
+            "多Agent 编排模式：主/编排/业务/SubAgent 协作。"
+            "输入你的问题，'/exit' 退出。\n"
+        )
+        _chat_loop(
+            main_agent,
+            tool_executor.enabled_toolsets if tool_executor else [],
+        )
+        return
+
+    llm, tool_executor, agent = _create_agent(config) # 创建llm ,tool
+
+    print_banner(
+        model=llm.model,
+        tool_count=len(tool_executor.tools_by_name),
+        compaction_enabled=agent.enable_compaction,
+    )
+    print_hint("输入你的问题，'/exit' 或 Ctrl+C 退出。\n")
+
+    _chat_loop(agent, tool_executor.enabled_toolsets)
 
 
 @app.command()
@@ -584,6 +683,40 @@ def toolset(
         f"[bright_black]已加载 {len(tool_executor.tools_by_name)} 个工具 "
         f"（标签过滤: CORE, CLI）[/bright_black]"
     )
+
+
+agents_app = typer.Typer(
+    name="agents",
+    help="多Agent 编排相关命令（角色查看等）",
+    no_args_is_help=True,
+)
+
+
+@agents_app.command("list")
+def agents_list(
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """列出多Agent 框架的固定角色与动态 SubAgent 上限（contracts/cli.md）。"""
+    config = Config(config_path=config_file)
+    settings = config.multi_agent_settings()
+    table = Table(title="多Agent 角色")
+    table.add_column("角色", style="bold")
+    table.add_column("职责")
+    table.add_column("类型", style=MUTED_STYLE)
+    rows = [
+        ("main", "用户交互与整体调度（现有 agent 包装）", "固定"),
+        ("orchestrator", "任务拆解与并行调度", "固定"),
+        ("business", "业务/领域子任务处理", "固定"),
+        ("subagent", "命令子任务执行", f"动态（上限 {settings.get('max_subagents', 4)}）"),
+    ]
+    for role, duty, kind in rows:
+        table.add_row(role, duty, kind)
+    console.print(table)
+    if not settings.get("enabled", False):
+        print_hint("multi_agent.enabled=false，可用 `agent chat --multi-agent` 临时启用。")
+
+
+app.add_typer(agents_app)
 
 
 @app.command()

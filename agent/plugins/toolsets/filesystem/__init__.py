@@ -1,4 +1,4 @@
-"""Filesystem toolset - local file operations in a sandboxed root directory."""
+"""文件系统工具集——在沙箱根目录内的本地文件操作。"""
 
 from agent.plugins.toolsets.filesystem.filesystem import (
     FilesystemToolConfig,

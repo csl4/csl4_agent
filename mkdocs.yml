@@ -15,6 +15,7 @@ edit_uri: edit/master/docs/
 nav:
     - Home: index.md
     - 系统架构: architecture.md
+    - 实现笔记与踩坑: implementation-notes.md
 
 theme:
     name: material

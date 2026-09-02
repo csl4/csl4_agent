@@ -41,7 +41,7 @@ from agent.core.models import (
     ToolInvokeContext,
 )
 from agent.core.tool_executor import ToolExecutor
-from agent.core.truncation.compaction import ConversationCompactor
+from agent.core.truncation.compaction import SessionCompactor
 from agent.core.truncation.input_context_window_limiter import ContextWindowLimiter
 from agent.utils.stream import StreamEvents, StreamMessage
 
@@ -74,7 +74,6 @@ class ToolCallingLLM:
         tool_executor: ToolExecutor,
         llm: LLM,
         max_steps: int = 20,
-        tool_results_dir: str = "/tmp/agent_tool_results",
         enable_compaction: bool = True,
         compaction_threshold_ratio: float = 0.75,
         compaction_keep_last_n: int = 6,
@@ -82,13 +81,12 @@ class ToolCallingLLM:
         self.tool_executor = tool_executor
         self.llm = llm
         self.max_steps = max_steps
-        self.tool_results_dir = tool_results_dir
         self.enable_compaction = enable_compaction
         self.compaction_threshold_ratio = compaction_threshold_ratio
         self.compaction_keep_last_n = compaction_keep_last_n
 
         # Initialize compaction utilities
-        self._compactor = ConversationCompactor(
+        self._compactor = SessionCompactor(
             llm=llm,
             keep_last_n=compaction_keep_last_n,
         )
@@ -129,61 +127,55 @@ class ToolCallingLLM:
         产出:
             主循环每一步的 StreamMessage 事件。
         """
-        if tool_decisions is None:
-            tool_decisions = {}
+        if tool_decisions is None: # 判断是否是当前agent的第一步
+            tool_decisions = {} #是第一步的化初始化 工具id许可列表
 
-        if frontend_tool_results is None:
-            frontend_tool_results = {}
+        if frontend_tool_results is None: # 查看前端的工具的处理结果
+            frontend_tool_results = {} # 无的化初始结果
 
-        working_messages = list(messages)
-        tools = self.tool_executor.get_tools_as_openai()
-        i = iteration_offset
-        tool_number = tool_number_offset
+        session_history = list(messages) # l
+        tools = self.tool_executor.get_tools_as_openai() # 把工具转化为openai的格式
+        i = iteration_offset # 迭代的次数
+        tool_number = tool_number_offset # 工具数量
 
         while i < self.max_steps:
             i += 1
 
-            # Check for cancellation
-            if cancel_event and cancel_event.is_set():
+
+            if cancel_event and cancel_event.is_set(): # 如果事件被用户取消则停止
                 yield StreamMessage(
                     event=StreamEvents.ERROR,
                     data={"error": "   cancelled by user."},
                 )
                 return
 
-            # ① Process approval decisions — re-execute approved tools
-            if tool_decisions:
+            if tool_decisions: # 如果tool_decisions 不为空则表明当前是用户判断过然后需要 执行的工具
                 approved_count = self._execute_tool_decisions(
                     tool_decisions=tool_decisions,
-                    working_messages=working_messages,
+                    session_history=session_history,
                     request_context=request_context,
                     tool_number=tool_number,
                 )
                 tool_number += approved_count
                 tool_decisions = {}  # Clear after processing
 
-            # ② Process frontend tool results — resume after FRONTEND_PAUSE
             if frontend_tool_results:
                 self._process_frontend_tool_results(
                     frontend_tool_results=frontend_tool_results,
-                    working_messages=working_messages,
+                    session_history=session_history,
                 )
                 frontend_tool_results = {}  # Clear after processing
 
-            # ③ Check compaction needed
             if self.enable_compaction and not (i >= self.max_steps):
-                if self._limiter.check_compaction_needed(working_messages, tools):
+                if self._limiter.check_compaction_needed(session_history, tools):
                     try:
                         current_tokens = self._limiter._estimate_tokens(
-                            working_messages, tools
+                            session_history, tools
                         )
                     except Exception:
-                        # Fall back to a rough estimate rather than crash the
-                        # turn over a compaction metric. Extended messages
-                        # should already be rare here (the JSON fallback in
-                        # count_tokens normally masks this).
+
                         current_tokens = len(
-                            json.dumps(working_messages, default=str)
+                            json.dumps(session_history, default=str)
                         ) // 4
                     max_tokens = self.llm.get_context_window_size()
 
@@ -192,36 +184,30 @@ class ToolCallingLLM:
                         data={
                             "current_tokens": current_tokens,
                             "max_tokens": max_tokens,
-                            "message_count": len(working_messages),
+                            "message_count": len(session_history),
                         },
                     )
 
-                    working_messages = self._compactor.compact(working_messages)
+                    session_history = self._compactor.compact(session_history)
 
                     yield StreamMessage(
                         event=StreamEvents.COMPACTED,
                         data={
-                            "new_message_count": len(working_messages),
+                            "new_message_count": len(session_history),
                         },
                     )
 
-            # ③.5 Safety net: inject denial results for any assistant
-            # tool_calls that never got a response message (e.g. a sibling of
-            # an approval-paused call, or an abandoned approval). Without this,
-            # providers reject the next request with "tool_call_ids did not
-            # have response messages".
-            self._resolve_orphaned_tool_calls(working_messages)
 
-            # ④ LLM call (streamed so answers render live; the provider
-            # reassembles fragmented tool_calls into a complete response)
+            self._resolve_orphaned_tool_calls(session_history)
+
             is_last_step = i >= self.max_steps
             deltas = self.llm.completion_stream(
-                messages=working_messages,
+                messages=session_history,
                 tools=tools if not is_last_step else None,
                 tool_choice="auto" if not is_last_step else "none",
             )
             response: ModelResponse
-            while True:
+            while True: # 内层迭代
                 try:
                     delta = next(deltas)
                 except StopIteration as stop:
@@ -233,13 +219,13 @@ class ToolCallingLLM:
                         data={"content": delta},
                     )
 
-            # Append assistant message to history
+            # Append assistant message to session history
             assistant_msg: Dict[str, Any] = {"role": "assistant"}
             if response.content:
                 assistant_msg["content"] = response.content
             if response.tool_calls:
                 assistant_msg["tool_calls"] = response.tool_calls
-            working_messages.append(assistant_msg)
+            session_history.append(assistant_msg)
 
             # ⑤ No tool_calls → answer complete
             if not response.tool_calls:
@@ -247,7 +233,7 @@ class ToolCallingLLM:
                     event=StreamEvents.ANSWER_END,
                     data={
                         "content": response.content,
-                        "messages": working_messages,
+                        "messages": session_history,
                         "num_llm_calls": i,
                         "usage": response.usage.model_dump() if response.usage else {},
                     },
@@ -302,7 +288,7 @@ class ToolCallingLLM:
                             continue
 
                         # ⑧ Normal result -> append to messages
-                        working_messages.append(result.to_llm_message())
+                        session_history.append(result.to_llm_message())
                         yield StreamMessage(
                             event=StreamEvents.TOOL_RESULT,
                             data={
@@ -343,7 +329,7 @@ class ToolCallingLLM:
                             }
                             for pr in approval_pauses
                         ],
-                        "messages": working_messages,
+                        "messages": session_history,
                         "num_llm_calls": i,
                     },
                 )
@@ -355,7 +341,7 @@ class ToolCallingLLM:
                     data={
                         "tool_name": frontend_pause.tool_name,
                         "tool_call_id": frontend_pause.tool_call_id,
-                        "messages": working_messages,
+                        "messages": session_history,
                         "num_llm_calls": i,
                     },
                 )
@@ -367,7 +353,7 @@ class ToolCallingLLM:
         # the caller would see no terminal event at all. Prefer whatever
         # content the final assistant message produced, else raise an error.
         last_assistant = next(
-            (m for m in reversed(working_messages) if m.get("role") == "assistant"),
+            (m for m in reversed(session_history) if m.get("role") == "assistant"),
             None,
         )
         fallback_content = (last_assistant or {}).get("content") or ""
@@ -376,7 +362,7 @@ class ToolCallingLLM:
                 event=StreamEvents.ANSWER_END,
                 data={
                     "content": fallback_content,
-                    "messages": working_messages,
+                    "messages": session_history,
                     "num_llm_calls": i,
                     "usage": {},
                     "max_steps_reached": True,
@@ -390,7 +376,7 @@ class ToolCallingLLM:
                         f"Max steps ({self.max_steps}) reached without a final "
                         "answer. Increase the step limit or simplify the task."
                     ),
-                    "messages": working_messages,
+                    "messages": session_history,
                 },
             )
 
@@ -561,7 +547,7 @@ class ToolCallingLLM:
     def _execute_tool_decisions(
         self,
         tool_decisions: Dict[str, bool],
-        working_messages: List[Dict[str, Any]],
+        session_history: List[Dict[str, Any]],
         request_context: Optional[Dict[str, Any]],
         tool_number: int,
     ) -> int:
@@ -573,20 +559,17 @@ class ToolCallingLLM:
 
         参数:
             tool_decisions: 映射 tool_call_id（优先）或 tool_name -> bool。
-            working_messages: 当前对话消息。
+            session_history: 当前对话消息。
             request_context: 单次请求的上下文字典。
             tool_number: 当前工具编号偏移量。
 
         返回:
             已执行的已批准工具数量。
         """
-        # Calls that already have a response must never be re-executed (a
-        # duplicate tool_call_id response would make providers reject the
-        # next request).
-        answered_ids = self._answered_tool_call_ids(working_messages)
+        answered_ids = self._answered_tool_call_ids(session_history)
 
         executed = 0
-        for msg in reversed(working_messages):
+        for msg in reversed(session_history):
             if msg.get("role") != "assistant":
                 continue
             tool_calls = msg.get("tool_calls", [])
@@ -613,14 +596,12 @@ class ToolCallingLLM:
                         tool_decisions={tc_id: True},
                     )
                     if isinstance(result, ToolCallResult):
-                        working_messages.append(result.to_llm_message())
+                        session_history.append(result.to_llm_message())
                         executed += 1
                 else:
-                    # Explicitly denied: record a denial result so the id is
-                    # answered (same shape as every other denial) and the model
-                    # can react to the refusal.
+
                     tool_name = tc.get("function", {}).get("name", "unknown")
-                    working_messages.append(
+                    session_history.append(
                         self._denial_result(
                             tool_call_id=tc_id,
                             tool_name=tool_name,
@@ -633,7 +614,7 @@ class ToolCallingLLM:
     def _process_frontend_tool_results(
         self,
         frontend_tool_results: Dict[str, Any],
-        working_messages: List[Dict[str, Any]],
+        session_history: List[Dict[str, Any]],
     ) -> None:
         """处理前端工具结果，以在 FRONTEND_PAUSE 之后恢复。
 
@@ -641,7 +622,7 @@ class ToolCallingLLM:
 
         参数:
             frontend_tool_results: 映射 tool_call_id → 结果数据。
-            working_messages: 当前对话消息。
+            session_history: 当前对话消息。
         """
         for tool_call_id, result_data in frontend_tool_results.items():
             content = (
@@ -649,7 +630,7 @@ class ToolCallingLLM:
                 if not isinstance(result_data, str)
                 else result_data
             )
-            working_messages.append({
+            session_history.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": content,

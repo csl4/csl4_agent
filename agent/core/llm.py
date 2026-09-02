@@ -105,7 +105,11 @@ class LLM(ABC):
         return response
 
     @abstractmethod
-    def count_tokens(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> ContextWindowUsage:
+    def count_tokens(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> ContextWindowUsage:
         """统计给定消息和工具的 token 数量。"""
         ...
 
@@ -302,7 +306,11 @@ class LiteLLMProvider(LLM):
             ),
         )
 
-    def count_tokens(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> ContextWindowUsage:
+    def count_tokens(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> ContextWindowUsage:
         """使用 litellm.token_counter 统计 token 数量。
 
         这是粗略估算回退（约每 token 4 个字符）的唯一位置，

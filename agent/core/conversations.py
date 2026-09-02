@@ -44,10 +44,10 @@ def add_or_update_system_prompt(
 
 
 # 核心入口：构造首轮 messages。内部先 build_system_prompt，再 build_user_prompt(可能含图)，
-    # 再接上既有 conversation_history。
+    # 再接上既有 session_history。
 def build_chat_messages(
     ask: str,
-    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    session_history: Optional[List[Dict[str, Any]]] = None,
     toolsets: Optional[List[Any]] = None,
     global_instructions: Optional[str] = None,
     skills: Optional[List[str]] = None,
@@ -60,12 +60,13 @@ def build_chat_messages(
 
     参数:
         ask: 用户的问题/请求。
-        conversation_history: 可选的先前对话消息。
+        session_history: 可选的历史会话消息（短期记忆）。
         toolsets: 可用 Toolset 对象列表。
         global_instructions: 可选的全局护栏（guardrails）。
         skills: 可选的技能描述。
         images: 可选的图片附件。
-        behavior_controls: 将 PromptComponent 映射到 bool 的字典（True = 包含）。
+        behavior_controls: 将 PromptComponent 映射到
+        bool 的字典（True = 包含）。
         custom_components: 将 PromptComponent 映射到自定义内容的字典。
         system_prompt_additions: 用户自定义的额外指令。
 
@@ -83,8 +84,8 @@ def build_chat_messages(
 
     user_content = build_user_prompt(ask, images)
 
-    if conversation_history:
-        messages = add_or_update_system_prompt(conversation_history, system_prompt)
+    if session_history:
+        messages = add_or_update_system_prompt(session_history, system_prompt)
         messages.append({"role": "user", "content": user_content})
         return messages
 

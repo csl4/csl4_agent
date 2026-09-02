@@ -18,5 +18,26 @@ import os
 # =========================================================
 
 # --- Logging ---
-# Used by agent.utils.log at import time, before Config is available.
+# LOG_LEVEL 在 agent.utils.log import 期就被读取（那时 Config 还没构造），保持冻结常量。
 LOG_LEVEL = os.getenv("AGENT_LOG_LEVEL", "INFO")
+
+# 以下三个仅在 setup_logging() 运行期读取，按「使用时读取」做成函数而不是冻结常量，
+# 这样运行期修改 os.environ 能生效，测试也能直接 monkeypatch（参见 CODE_REVIEW P2-6）。
+def log_file_enabled() -> bool:
+    """文件日志开关：AGENT_LOG_FILE 非 0/false/no/off 即开启（默认开启）。"""
+    return os.getenv("AGENT_LOG_FILE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def log_dir() -> str:
+    """日志目录：AGENT_LOG_DIR 覆盖；空串表示用默认 ~/.agent/logs。"""
+    return os.getenv("AGENT_LOG_DIR", "").strip()
+
+
+def third_party_log_level() -> str:
+    """受管第三方 logger 的统一级别（默认 WARNING；LiteLLM 固定 ERROR）。"""
+    return os.getenv("AGENT_LOG_THIRD_PARTY_LEVEL", "WARNING").strip().upper()

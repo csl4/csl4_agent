@@ -41,7 +41,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "agent": {
         "max_steps": 20,
-        "tool_results_dir": "/tmp/agent_tool_results",
         "global_instructions": "",
         "enable_compaction": True,
         "compaction_threshold_ratio": 0.75,
@@ -50,6 +49,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Per-toolset config sections; see each toolset's config class for fields.
     "bash": {},
     "toolsets": [],
+    # 多Agent 编排配置（宪法 III：新增字段，不改动既有字段名，向后兼容）。
+    "multi_agent": {
+        "enabled": False,  # 默认关闭，保持单Agent 行为
+        "max_subagents": 4,  # 单任务最大并行 SubAgent 数
+        "orchestrator_model": "",  # 空则复用 llm.model
+        "a2a": {"transport": "in-process"},
+        "sandbox": {"type": "lightweight", "timeout_seconds": 30, "working_dir": ""},
+    },
 }
 
 
@@ -69,14 +76,11 @@ class Config:
         # merge/env/override steps below mutate in place, so a shallow copy
         # would leak one Config instance's values into the next one.
         config = copy.deepcopy(DEFAULT_CONFIG)
-        print("默认配置",config)
-
 
         if self.config_path.exists():
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     user_config = yaml.safe_load(f) or {}
-                    print("用户的配置",user_config)
                 self._deep_merge(config, user_config)
                 logger.info(f"Loaded config from {self.config_path}")
             except Exception as e:
@@ -91,11 +95,22 @@ class Config:
         config["agent"]["max_steps"] = self._env_int(
             "AGENT_MAX_STEPS", config["agent"]["max_steps"]
         )
-        config["agent"]["tool_results_dir"] = os.getenv(
-            "AGENT_TOOL_RESULTS_DIR", config["agent"]["tool_results_dir"]
+        config["multi_agent"]["enabled"] = self._env_bool(
+            "AGENT_MULTI_AGENT", config["multi_agent"]["enabled"]
+        )
+        config["multi_agent"]["max_subagents"] = self._env_int(
+            "AGENT_MAX_SUBAGENTS", config["multi_agent"]["max_subagents"]
         )
 
         return config
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        """读取布尔类型的环境变量；非法值回退默认并给出警告。"""
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return default
+        return raw.strip().lower() in ("1", "true", "yes", "on")
 
     @staticmethod
     def _env_int(name: str, default: int) -> int:
@@ -121,6 +136,13 @@ class Config:
                 Config._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def multi_agent_settings(self) -> Dict[str, Any]:
+        """返回多Agent 配置段（始终存在默认值，缺失时自动补默认，向后兼容）。"""
+        settings = self.data.get("multi_agent") or {}
+        merged = dict(DEFAULT_CONFIG["multi_agent"])
+        merged.update(settings)
+        return merged
 
     def create_llm(self) -> LLM:
         """根据配置创建 LLM provider。"""
@@ -200,7 +222,6 @@ class Config:
             or self.create_tool_executor(toolset_tag_filter=toolset_tag_filter),
             llm=llm or self.create_llm(),
             max_steps=agent_config["max_steps"],
-            tool_results_dir=agent_config["tool_results_dir"],
             enable_compaction=agent_config.get("enable_compaction", True),
             compaction_threshold_ratio=agent_config.get(
                 "compaction_threshold_ratio", 0.75

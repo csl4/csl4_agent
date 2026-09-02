@@ -7,6 +7,9 @@
 #                    ANSWER_END(最终答案) / APPROVAL_REQUIRED(审批暂停) / FRONTEND_PAUSE /
 #                    COMPACTION_START / COMPACTED / ERROR 等。
 #   StreamMessage → 单个事件，带 to_sse() 转成 SSE 文本 `event:xxx\ndata:{json}\n\n`。
+# 多Agent 事件（T017，向后兼容）：MULTI_AGENT_DECOMPOSE(任务拆解) /
+#   MULTI_AGENT_SUBAGENT(SubAgent 启停/结果) / MULTI_AGENT_DONE(任务完成)。
+#   既有事件消费方无需改动 —— 新事件只是新增枚举成员（宪法 II）。
 # 数据流位置：ToolCallingLLM.call_stream() 逐个 yield StreamMessage；前端据此渲染/cli据此 print。
 # =========================================================
 
@@ -28,9 +31,13 @@ class StreamEvents(str, Enum):
     AI_MESSAGE = "ai_message"
     APPROVAL_REQUIRED = "approval_required"
     TOKEN_COUNT = "token_count"
-    COMPACTION_START = "conversation_history_compaction_start"
-    COMPACTED = "conversation_history_compacted"
+    COMPACTION_START = "compaction_start"
+    COMPACTED = "compacted"
     FRONTEND_PAUSE = "frontend_pause"
+    # ---- 多Agent 编排事件（T017，向后兼容新增）----
+    MULTI_AGENT_DECOMPOSE = "multi_agent_decompose"
+    MULTI_AGENT_SUBAGENT = "multi_agent_subagent"
+    MULTI_AGENT_DONE = "multi_agent_done"
 
 
 class StreamMessage(BaseModel):

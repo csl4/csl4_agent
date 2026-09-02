@@ -1,23 +1,14 @@
-"""Common constants and environment variables."""
+"""通用常量和环境变量。
+
+注意：所有 agent 配置都位于 `agent.config.Config` 中。
+本包只重新导出 import 期常量（例如 LOG_LEVEL）。
+"""
 
 from agent.common.env_vars import (
-    API_KEY,
-    BASE_URL,
     LOG_LEVEL,
-    MAX_STEPS,
-    MODEL,
-    SERVER_HOST,
-    SERVER_PORT,
-    TOOL_RESULTS_DIR,
+    log_dir,
+    log_file_enabled,
+    third_party_log_level,
 )
 
-__all__ = [
-    "API_KEY",
-    "BASE_URL",
-    "LOG_LEVEL",
-    "MAX_STEPS",
-    "MODEL",
-    "SERVER_HOST",
-    "SERVER_PORT",
-    "TOOL_RESULTS_DIR",
-]
+__all__ = ["LOG_LEVEL", "log_dir", "log_file_enabled", "third_party_log_level"]

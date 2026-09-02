@@ -13,11 +13,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_COMPACTION_PROMPT = (
-    "Please summarize the following conversation history concisely. "
+    "Please summarize the following session history concisely. "
     "Focus on: key facts discovered, decisions made, tool calls and their results, "
     "and any unresolved questions. "
     "Keep the summary brief but don't lose important context.\n\n"
-    "Conversation:\n{conversation}"
+    "Session history:\n{session_history}"
 )
 
 
@@ -26,8 +26,8 @@ DEFAULT_COMPACTION_PROMPT = (
 # 设计要点：保系统提示词 + 最近的 keep_last_n 条，其余交给 LLM 摘要；
 #           就有个细节——压缩边界若恰好落在 assistant.tool_calls 消息后，会被拉进保留区，
 #           避免「工具结果悬空、下轮 LLM 调用因 orphaned tool_call 被拒」。
-class ConversationCompactor:
-    """通过摘要较早的消息来压缩过长的对话历史。
+class SessionCompactor:
+    """通过摘要较早的消息来压缩过长的会话历史。
 
     使用 LLM 为较早的消息生成简洁摘要，
     用一条系统消息替换它们，以节省上下文窗口空间。
@@ -44,7 +44,7 @@ class ConversationCompactor:
         参数:
             llm: LLM 实例（必须具有 completion() 方法）。
             compaction_prompt: 用于摘要的自定义提示词模板。
-                必须包含 `{conversation}` 占位符。
+                必须包含 `{session_history}` 占位符。
             keep_last_n: 保留不压缩的最近消息条数。
         """
         self.llm = llm
@@ -138,7 +138,7 @@ class ConversationCompactor:
         compacted.extend(recent)
 
         logger.info(
-            f"Compacted conversation: {total} messages → {len(compacted)} messages"
+            f"Compacted session: {total} messages → {len(compacted)} messages"
         )
         return compacted
 
@@ -152,9 +152,9 @@ class ConversationCompactor:
             一段简洁的摘要字符串。
         """
         # Format messages as readable text
-        conversation_text = self._format_messages(messages)
+        session_text = self._format_messages(messages)
 
-        prompt = self.compaction_prompt.format(conversation=conversation_text)
+        prompt = self.compaction_prompt.format(session_history=session_text)
 
         try:
             response = self.llm.completion(

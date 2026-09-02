@@ -32,10 +32,10 @@ from agent.core.models import (
 from agent.core.tools import (
     CallablePrerequisite,
     Tool,
-    Transformer,
     Toolset,
     ToolsetTag,
     ToolsetType,
+    Transformer,
 )
 from agent.core.transformers.builtin import JsonTruncationTransformer
 from agent.utils.pydantic_utils import ToolsetConfig
@@ -46,7 +46,10 @@ class FilesystemToolConfig(ToolsetConfig):
 
     root_dir: str = Field(
         default=".",
-        description="Sandbox root directory. All file operations are restricted to this directory and its subdirectories.",
+        description=(
+            "Sandbox root directory. All file operations are restricted to "
+            "this directory and its subdirectories."
+        ),
     )
     max_read_lines: int = Field(default=200, description="Max lines returned by read_file")
     encoding: str = Field(default="utf-8", description="File encoding for read/write")

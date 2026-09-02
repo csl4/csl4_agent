@@ -7,7 +7,8 @@
 
 # ======================= 中文导览 =======================
 # 跨命令复用的 Typer 选项定义（CLI 参数 → Config 装配的入口之一）。
-# opt_* 一批：--api-key / --model / --base-url / --config / --max-steps / --verbose / --no-compaction / --json-output-file。
+# opt_* 一批：--api-key / --model / --base-url / --config / --max-steps /
+# --verbose / --no-compaction / --json-output-file。
 # 铁律：凡也存在于 config 文件的选项，默认值【必须是 None】——
 #   CLI 非空值才覆盖配置文件，否则 CLI 默认值会压掉配置（见 agent/main.py 装配）。
 # 数据流：CLI 键入 → opt_* 变量 → Config 构造函数 → create_llm / create_tool_calling_llm。
@@ -45,7 +46,10 @@ opt_config_file: Optional[Path] = typer.Option(
     None,
     "--config",
     "-c",
-    help="Path to the config file. Defaults to ~/.agent/config.yaml when it exists. CLI arguments take precedence over config file settings",
+    help=(
+        "Path to the config file. Defaults to ~/.agent/config.yaml when it exists. "
+        "CLI arguments take precedence over config file settings"
+    ),
 )
 
 # Maximum agent iterations

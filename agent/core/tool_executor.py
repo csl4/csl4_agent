@@ -20,7 +20,6 @@ from agent.core.models import (
     StructuredToolResult,
     StructuredToolResultStatus,
     ToolCallResult,
-    ToolParameter,
 )
 from agent.core.tools import Tool, Toolset, ToolsetStatusEnum, ToolsetTag, ToolsetType
 

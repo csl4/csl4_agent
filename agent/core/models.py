@@ -12,10 +12,9 @@
 # =========================================================
 
 
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
-
 import json
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -52,7 +51,6 @@ class StructuredToolResultStatus(str, Enum):
 # 设计要点：status 决定语义（成功/失败/无数据/审批/前端暂停），data/error 携带载荷。
 # 它【不】携带 tool_call_id —— 那是 ToolCallResult 的职责（适配层分离）。
 class StructuredToolResult(BaseModel):
-    """一次工具调用的结果，包含状态以及可选的 data/error。"""
 
     status: StructuredToolResultStatus
     data: Any = None

@@ -1,1 +1,1 @@
-"""Jinja2 prompt templates for toolsets."""
+"""面向工具集的 Jinja2 提示词模板。"""
