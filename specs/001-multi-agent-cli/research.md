@@ -29,7 +29,7 @@
 - **传输**: JSON-RPC 2.0 over HTTP + SSE 流式；本特性 v1 以**进程内**方式调用协议模型，
   保留 HTTP 端点扩展点（`a2a/server.py` 为可选，不阻塞 v1 交付）。
 
-## 2. 业务 Agent 与 编排 Agent 职责划分（NEEDS CLARIFICATION 的默认决策）
+## 2. 业务 Agent 与 编排 Agent 职责划分（/speckit-clarify 已确认的决策）
 
 - **Decision**: 编排 Agent 负责**任务拆解 + 并行调度 + SubAgent 生命周期**；业务 Agent 负责
   **业务/领域任务处理**（纯执行方）。主 Agent（现有 agent）负责用户交互与整体触发。
@@ -82,10 +82,14 @@
 
 ## Follow-up TODOs
 
-- TODO(A2A_VERIFY): 联网核实 a2a-sdk 当前版本、包名（`a2a-sdk` / `a2a`）、Python 3.10 兼容性
-  与 client/server API 签名后锁定依赖版本。
-- TODO(TERMINAL_MAP): 实现阶段补充三终端命令差异映射表的完整用例（bash/zsh 差异较小，
-  PowerShell 差异较大）。
+- ~~TODO(A2A_VERIFY)~~ **已核实（2026-09-02，T037）**: 本环境网络仍受限（WebSearch/WebFetch
+  403），无法在线核实最新版本；以**实际安装并验证可用**的版本锁定：
+  PyPI 包名 `a2a-sdk`（导入名 `a2a`，非 `a2a_sdk`），安装版本 `1.0.0a2`，
+  已在 Python 3.11 上通过全量离线测试（本仓库未联网场景）。`pyproject.toml`
+  已锁定 `a2a-sdk == 1.0.0a2`；后续接入真实 HTTP 端点时再升级并复核 schema。
+- ~~TODO(TERMINAL_MAP)~~ **已实现（T022）**: `agent/core/env/terminal.py` 的
+  `BASH_TO_POWERSHELL` 映射表 + `adapt_command` 段级改写，单测覆盖同义命令、
+  管道/组合段、未知动词透传；zsh/bash 直通，PowerShell 差异集中处理。
 
 ## 决策汇总
 

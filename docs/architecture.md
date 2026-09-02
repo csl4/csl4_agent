@@ -90,7 +90,7 @@ flowchart TD
 
 | 模块 | 路径 | 关键类 / 函数 |
 |---|---|---|
-| CLI 入口 | `agent/main.py` | `app`（Typer）、`_create_agent()`、`_run_turn()`、`_consume_stream()` |
+| CLI 入口 | `agent/main.py` | `app`（Typer）、`_create_agent()`、`_create_multi_agent()`、`_run_turn()`、`_consume_stream()` |
 | CLI 复用选项 | `agent/common/cli_commons.py` | `opt_api_key` / `opt_model` / `opt_config_file` 等 |
 | 装配根 | `agent/config.py` | `Config.create_llm()` / `create_tool_executor()` / `create_tool_calling_llm()` |
 | 主循环 | `agent/core/tool_calling_llm.py` | `ToolCallingLLM.call_stream()` |
@@ -102,6 +102,12 @@ flowchart TD
 | 压缩管控 | `agent/core/truncation/` | `SessionCompactor`、`ContextWindowLimiter` |
 | 结果瘦身 | `agent/core/transformers/builtin.py` | `JsonTruncationTransformer`、`LineCountTransformer` |
 | 事件协议 | `agent/utils/stream.py` | `StreamEvents`、`StreamMessage` |
+| Agent 角色 | `agent/core/agents/` | `BaseAgent`(ABC)、`MainAgent`、`Orchestrator`、`BusinessAgent`、`SubAgent` |
+| A2A 协议 | `agent/core/a2a/` | `protocol.py`（Task/Message/Part）、`InProcessA2AClient` |
+| 终端适配 | `agent/core/env/terminal.py` | `TerminalType`、`detect_shell()`、`adapt_command()`、`execute_in_shell()` |
+| 技能注入 | `agent/core/skills/` | `SkillLibrary`、`collect_env_info()`、`format_env_info()` |
+| 历史存储 | `agent/core/history/store.py` | `HistoryRecord`、`HistoryStore` |
+| 轻量沙箱 | `agent/plugins/toolsets/sandbox/` | `RunSandboxCommand`、`create_sandbox_toolset()` |
 
 ## 类层次要点
 

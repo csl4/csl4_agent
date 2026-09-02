@@ -130,9 +130,9 @@ description: "Task list for 多Agent CLI 框架 (multi-agent-cli)"
 
 **Purpose**: 跨故事收尾
 
-- [ ] T035 [P] 文档更新：README 功能表 + `docs/` 特性页 + mkdocs 导航注册（CLAUDE.md「Adding a New Integration」清单）
-- [ ] T036 [P] 运行 `specs/001-multi-agent-cli/quickstart.md` 全部验证场景并记录结果（手动端到端 + 自动化测试）
-- [ ] T037 清理与对齐：消除实现阶段遗留 TODO（如 research.md TODO(A2A_VERIFY) 联网核实后锁定依赖）、确认无遗留占位符、契约与实现一致
+- [X] T035 [P] 文档更新：README 功能表 + `docs/` 特性页 + mkdocs 导航注册（CLAUDE.md「Adding a New Integration」清单）
+- [X] T036 [P] 运行 `specs/001-multi-agent-cli/quickstart.md` 全部验证场景并记录结果（手动端到端 + 自动化测试）
+- [X] T037 清理与对齐：消除实现阶段遗留 TODO（如 research.md TODO(A2A_VERIFY) 联网核实后锁定依赖）、确认无遗留占位符、契约与实现一致
 
 ---
 

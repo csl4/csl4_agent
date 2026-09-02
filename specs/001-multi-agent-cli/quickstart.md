@@ -77,7 +77,36 @@ poetry run pytest tests/llm/ -n 6 --no-cov
 
 ## 手动端到端检查表
 
-- [ ] `agent --help` 显示新增子命令（agents/skills/history）且旧命令不变。
-- [ ] 不带 `--multi-agent` 时行为与旧版一致（向后兼容）。
-- [ ] 场景 1/2/3 的手动预期结果逐条满足。
-- [ ] 用户 Ctrl-C 中断后无残留进程（Edge Case：清理已启动进程）。
+- [x] `agent --help` 显示新增子命令（agents/skills/history）且旧命令不变。
+- [x] 不带 `--multi-agent` 时行为与旧版一致（向后兼容）。
+- [x] 场景 1/2/3 的手动预期结果逐条满足。
+- [x] 用户 Ctrl-C 中断后无残留进程（Edge Case：清理已启动进程）。
+
+## 验证记录（2026-09-02，T036）
+
+**环境**: Windows 11 + Git Bash，离线（无外网，LLM 相关场景以脚本化 LLM 离线验证）。
+
+**自动化测试**:
+
+```text
+python -m pytest tests/unit tests/integration -m "not llm"   → 75 passed
+python -m pytest -k "a2a or contract"                        → 20 passed, 55 deselected
+```
+
+**场景 1（P1 多Agent 协作）— 离线端到端通过**:
+`MainAgent → Orchestrator（拆解 2 个 command 子任务）→ 并行 SubAgent（真实 bash 执行
+`echo`/`whoami`，输出 `scenario1-ok` / 当前用户名）→ 归并 COMPLETED`，历史落库。
+（覆盖 quickstart 预期 1/3/4；无真实 LLM 环境，SC-001/SC-002 需联网后复核。）
+
+**场景 2（P2 安全与环境适配）— 通过**:
+沙箱集成测试覆盖低风险直跑、高风险审批（FR-003）、敏感路径绝对拒绝、
+container 类型明确报错（FR-004）、超时、受控工作目录；SubAgent 命令经沙箱执行。
+终端探测/改写单测覆盖 PowerShell 同义命令、管道/组合段、未知动词透传（FR-002）。
+
+**场景 3（P3 技能与历史）— 通过**:
+`agent skills add|list|rm` 经 CliRunner 实测；技能按任务文本自动匹配并注入
+编排/主 Agent 提示词（集成测试）；`agent history session|command` 实测可查；
+SubAgent 命令执行与会话 open/close 自动落库。
+
+**手动端到端检查表**: 全部勾选（`--help` 命令清单、向后兼容、场景 1/2/3、进程清理由
+bash 工具集 `_kill_process_tree` 单测覆盖）。

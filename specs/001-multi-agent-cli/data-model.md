@@ -117,5 +117,6 @@ Agent 间通过 A2A 协议交换的工作单元（plan.md 决策 1/2）。
 
 ## 未决项（实现阶段核实）
 
-- TODO(A2A_SCHEMA): a2a-sdk 的 Task/Message/Part 具体 schema 字段名以官方 SDK 为准
-  （research.md TODO(A2A_VERIFY) 解锁后对齐）。
+- ~~TODO(A2A_SCHEMA)~~ **已对齐（T037）**: a2a-sdk 的 Task/Message/Part 具体 schema
+  字段名以实际安装的 `a2a-sdk==1.0.0a2` protobuf 类型为准，全量集成测试验证通过
+  （见 contracts/a2a.md 验证节与 research.md §Follow-up）。

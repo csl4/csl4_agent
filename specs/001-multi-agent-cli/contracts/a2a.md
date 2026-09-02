@@ -55,4 +55,7 @@ Agent 间内容交换（FR-005 结果整理）：
 
 - A2A 消息/Task 序列化往返一致（unit 测试：构造→序列化→反序列化→断言字段）。
 - 集成测试（`responses` mock HTTP）：主 Agent 分发→工作 Agent 回执→结果归并。
-- TODO(A2A_VERIFY): 与 a2a-sdk 实际类型对齐字段名（research.md follow-up）。
+- ~~TODO(A2A_VERIFY)~~ **已对齐（T037）**: 字段名以实际安装的 `a2a-sdk==1.0.0a2`
+  protobuf 类型为准（`Task`/`TaskState`/`Message`/`Part`/`Role`），由
+  `tests/integration/test_skills_history_flow.py`、`test_safety_sandbox.py` 等
+  全量集成测试在真实 a2a-sdk 上验证通过（详见 research.md §Follow-up）。
