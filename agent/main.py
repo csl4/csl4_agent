@@ -3,7 +3,8 @@
 
 # ======================= 中文导览 =======================
 # 本文件是【CLI 入口】（Typer 应用），把核心 Engine 暴露成命令行。
-#   命令：run(单次) / chat(交互) / serve(占位) / toolset(列出工具集) / version。
+#   命令：run(单次) / chat(交互) / serve(占位) / toolset(列出工具集) /
+#         agents list / skills list|add|rm / history session|command / version。
 # 关键流程：
 #   Config → create_llm/create_tool_executor/create_tool_calling_llm（装配）
 #   build_chat_messages → 构造 messages
@@ -16,6 +17,7 @@ import json
 import logging
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,6 +38,9 @@ from agent.common.cli_commons import (
 from agent.config import Config
 from agent.core.agents import MainAgent, Orchestrator
 from agent.core.conversations import build_chat_messages
+from agent.core.history.store import HistoryStore
+from agent.core.skills.env_info import collect_env_info, format_env_info
+from agent.core.skills.library import Skill, SkillLibrary
 from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.core.tools import ToolsetTag
 from agent.plugins.toolsets.bash.common.cli_prefixes import (
@@ -128,6 +133,8 @@ def _create_multi_agent(config: Config) -> MainAgent:
     主 Agent 包装现有 ToolCallingLLM（单 Agent 行为不变）；
     编排 Agent 负责拆解 + 并行调度；命令子任务由动态 SubAgent 经
     同一 ToolExecutor 执行（FR-001）。
+    US3：装配本地技能库（FR-006）、环境信息快照（FR-007）与
+    历史存储（FR-008），一并注入编排/主 Agent。
     """
     settings = config.multi_agent_settings()
     llm = config.create_llm()
@@ -142,17 +149,27 @@ def _create_multi_agent(config: Config) -> MainAgent:
         tool_executor=tool_executor,
         llm=llm,
     )
+    history = HistoryStore()
+    skill_library = SkillLibrary()
+    knowledge_text = format_env_info(
+        collect_env_info(tool_names=list(tool_executor.tools_by_name.keys()))
+    )
     orchestrator = Orchestrator(
         agent_id="orchestrator",
         llm=orchestrator_llm,
         tool_executor=tool_executor,
         max_subagents=settings.get("max_subagents", 4),
+        skill_library=skill_library,
+        knowledge_text=knowledge_text,
+        history=history,
     )
     return MainAgent(
         agent_id="main",
         tool_calling_llm=tool_calling_llm,
         orchestrator=orchestrator,
         llm=llm,
+        skill_library=skill_library,
+        knowledge_text=knowledge_text,
     )
 
 
@@ -613,10 +630,21 @@ def chat(
             "多Agent 编排模式：主/编排/业务/SubAgent 协作。"
             "输入你的问题，'/exit' 退出。\n"
         )
-        _chat_loop(
-            main_agent,
-            tool_executor.enabled_toolsets if tool_executor else [],
-        )
+        # FR-008：会话生命周期落历史（open → close）。
+        history = main_agent.orchestrator.history if main_agent.orchestrator else None
+        session_id = f"cli-{uuid.uuid4().hex[:8]}"
+        if history is not None:
+            history.append_session(session_id=session_id, payload={"status": "open"})
+        try:
+            _chat_loop(
+                main_agent,
+                tool_executor.enabled_toolsets if tool_executor else [],
+            )
+        finally:
+            if history is not None:
+                history.append_session(
+                    session_id=session_id, payload={"status": "closed"}
+                )
         return
 
     llm, tool_executor, agent = _create_agent(config) # 创建llm ,tool
@@ -717,6 +745,134 @@ def agents_list(
 
 
 app.add_typer(agents_app)
+
+
+# ======================= US3：技能库管理（FR-006） =======================
+skills_app = typer.Typer(
+    name="skills",
+    help="本地技能库管理（US3 FR-006，contracts/cli.md）",
+    no_args_is_help=True,
+)
+
+
+def _print_skills(lib: SkillLibrary) -> None:
+    table = Table(title="本地技能库")
+    table.add_column("名称", style="bold")
+    table.add_column("描述")
+    table.add_column("绑定工具", style=MUTED_STYLE)
+    for skill in lib.list():
+        table.add_row(
+            skill.name,
+            skill.description,
+            ", ".join(skill.tool_bindings) or "-",
+        )
+    console.print(table)
+    if not lib.list():
+        print_hint("技能库为空，可用 `agent skills add <skill.yaml>` 添加。")
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """列出本地技能库中的技能。"""
+    _print_skills(SkillLibrary())
+
+
+@skills_app.command("add")
+def skills_add(
+    skill_file: Path = typer.Argument(..., help="技能 YAML 文件路径"),
+) -> None:
+    """从 YAML 文件添加/更新一条技能（data-model.md Skill）。"""
+    if not skill_file.exists():
+        raise typer.BadParameter(f"技能文件不存在: {skill_file}")
+    import yaml
+
+    data = yaml.safe_load(skill_file.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict) or not data.get("name"):
+        print_error(f"技能文件缺少 name 字段: {skill_file}")
+        raise typer.Exit(code=1)
+    lib = SkillLibrary()
+    path = lib.add(
+        Skill(
+            name=str(data["name"]),
+            description=str(data.get("description", "")),
+            instructions=str(data.get("instructions", "")),
+            tool_bindings=[str(t) for t in (data.get("tool_bindings") or [])],
+            keywords=[str(k) for k in (data.get("keywords") or [])],
+        )
+    )
+    console.print(f"[green]已添加技能[/green] {data['name']} → {path}")
+
+
+@skills_app.command("rm")
+def skills_rm(
+    name: str = typer.Argument(..., help="技能名"),
+) -> None:
+    """从本地技能库删除一条技能。"""
+    if SkillLibrary().remove(name):
+        console.print(f"[green]已删除技能[/green]: {name}")
+    else:
+        print_error(f"技能不存在: {name}")
+        raise typer.Exit(code=1)
+
+
+app.add_typer(skills_app)
+
+
+# ======================= US3：历史/日志查询（FR-008） =======================
+history_app = typer.Typer(
+    name="history",
+    help="查询执行日志/会话历史（US3 FR-008，contracts/cli.md）",
+    no_args_is_help=True,
+)
+
+
+def _print_history_records(records: List[Any], title: str) -> None:
+    table = Table(title=title)
+    table.add_column("类型", style="bold")
+    table.add_column("时间", style=MUTED_STYLE)
+    table.add_column("会话", style=MUTED_STYLE)
+    table.add_column("Agent", style=MUTED_STYLE)
+    table.add_column("内容")
+    for rec in records:
+        payload = rec.payload
+        summary = (
+            str(payload.get("command", ""))
+            if "command" in payload
+            else json.dumps(payload, ensure_ascii=False, default=str)
+        )
+        table.add_row(
+            rec.type,
+            rec.created_at,
+            rec.session_id or "-",
+            rec.agent_id or "-",
+            summary[:120],
+        )
+    console.print(table)
+    if not records:
+        print_hint("没有匹配的历史记录。")
+
+
+@history_app.command("session")
+def history_session(
+    session_id: str = typer.Argument(..., help="会话 ID"),
+) -> None:
+    """查询指定会话的历史记录。"""
+    _print_history_records(
+        HistoryStore().query_session(session_id), title=f"会话历史: {session_id}"
+    )
+
+
+@history_app.command("command")
+def history_command(
+    pattern: str = typer.Argument(..., help="命令文本匹配模式（子串，不区分大小写）"),
+) -> None:
+    """按命令文本模式查询执行记录。"""
+    _print_history_records(
+        HistoryStore().query_command(pattern), title=f"命令历史: {pattern}"
+    )
+
+
+app.add_typer(history_app)
 
 
 @app.command()

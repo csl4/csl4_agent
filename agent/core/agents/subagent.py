@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.core.a2a.protocol import Task, TaskState, set_task_state
 from agent.core.agents.base_agent import AgentRole, BaseAgent, task_input_text
 from agent.core.env.terminal import detect_shell
+from agent.core.history.store import HistoryStore
 from agent.core.models import (
     StructuredToolResultStatus,
     ToolCallResult,
@@ -79,9 +80,12 @@ class SubAgent(BaseAgent):
         tool_executor: ToolExecutor,
         name: str = "",
         parent: Optional[BaseAgent] = None,
+        history: Optional[HistoryStore] = None,
     ) -> None:
         super().__init__(agent_id, AgentRole.SUBAGENT, name=name, parent=parent)
         self.tool_executor = tool_executor
+        # US3 FR-008：命令执行历史库（可选，注入后每次命令执行落一条记录）。
+        self.history = history
 
     def run_task(self, task: Task) -> Task:
         text = task_input_text(task, self.context_messages())
@@ -94,6 +98,7 @@ class SubAgent(BaseAgent):
             )
             return task
 
+        self._record_command(tool_name, params, task)
         context = ToolInvokeContext(
             tool_name=tool_name,
             user_approved=False,
@@ -103,6 +108,25 @@ class SubAgent(BaseAgent):
             tool_name, params, context, tool_call_id=f"sub-{task.id}"
         )
         return self._complete_from_result(task, result)
+
+    def _record_command(
+        self, tool_name: str, params: Dict[str, Any], task: Task
+    ) -> None:
+        """命令子任务执行前把命令写入历史（FR-008/T034）。
+
+        仅记录命令类工具（sandbox/bash）且带 command 参数的调用。
+        """
+        if self.history is None:
+            return
+        command = params.get("command") if isinstance(params, dict) else None
+        if not command:
+            return
+        self.history.append_command(
+            command=str(command),
+            session_id=task.id,
+            agent_id=self.agent_id,
+            shell=str(params.get("shell", "") or ""),
+        )
 
     def _pick_command_tool(self) -> Optional[str]:
         """命令子任务优先走轻量沙箱工具；未注册时回退 bash（US1 行为不变）。"""

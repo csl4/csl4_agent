@@ -110,17 +110,17 @@ description: "Task list for 多Agent CLI 框架 (multi-agent-cli)"
 
 ### Tests for User Story 3（宪法 IV 强制）⚠️
 
-- [ ] T027 [P] [US3] 单测技能库匹配、环境信息采集、历史存储/查询在 `tests/unit/test_skills_history.py`
-- [ ] T028 [P] [US3] 集成测试技能触发任务 + 历史查询流程在 `tests/integration/test_skills_history_flow.py`
+- [X] T027 [P] [US3] 单测技能库匹配、环境信息采集、历史存储/查询在 `tests/unit/test_skills_history.py`
+- [X] T028 [P] [US3] 集成测试技能触发任务 + 历史查询流程在 `tests/integration/test_skills_history_flow.py`
 
 ### Implementation for User Story 3
 
-- [ ] T029 [P] [US3] 实现技能库 `agent/core/skills/library.py`：加载 YAML 技能（name/description/instructions/tool_bindings，data-model.md Skill）、按任务匹配、注入上下文（FR-006）
-- [ ] T030 [P] [US3] 实现环境信息快照 `agent/core/skills/env_info.py`：cwd、shell、可用工具、平台（FR-007，data-model.md EnvironmentInfo）
-- [ ] T031 [P] [US3] 实现历史存储 `agent/core/history/store.py`：JSONL 追加式持久化会话/命令执行记录 + 查询接口（FR-008，SC-005）
-- [ ] T032 [US3] 接线技能注入与环境信息到 Agent 上下文（MainAgent/Orchestrator 组装时注入，FR-006/007）
-- [ ] T033 [US3] CLI 子命令 `agent skills list|add|rm`、`agent history session|command` 在 `agent/main.py`（contracts/cli.md）
-- [ ] T034 [US3] 执行记录落库：每次 CommandExecution 与 Session 关闭 MUST 写入历史（data-model.md 验证规则，FR-008）
+- [X] T029 [P] [US3] 实现技能库 `agent/core/skills/library.py`：加载 YAML 技能（name/description/instructions/tool_bindings，data-model.md Skill）、按任务匹配、注入上下文（FR-006）
+- [X] T030 [P] [US3] 实现环境信息快照 `agent/core/skills/env_info.py`：cwd、shell、可用工具、平台（FR-007，data-model.md EnvironmentInfo）
+- [X] T031 [P] [US3] 实现历史存储 `agent/core/history/store.py`：JSONL 追加式持久化会话/命令执行记录 + 查询接口（FR-008，SC-005）
+- [X] T032 [US3] 接线技能注入与环境信息到 Agent 上下文（MainAgent/Orchestrator 组装时注入，FR-006/007）
+- [X] T033 [US3] CLI 子命令 `agent skills list|add|rm`、`agent history session|command` 在 `agent/main.py`（contracts/cli.md）
+- [X] T034 [US3] 执行记录落库：每次 CommandExecution 与 Session 关闭 MUST 写入历史（data-model.md 验证规则，FR-008）
 
 **Checkpoint**: All user stories should now be independently functional
 

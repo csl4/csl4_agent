@@ -32,8 +32,15 @@ class BusinessAgent(BaseAgent):
         llm: Optional[LLM] = None,
         name: str = "",
         parent: Optional[BaseAgent] = None,
+        knowledge_text: str = "",
     ) -> None:
-        super().__init__(agent_id, AgentRole.BUSINESS, name=name or "business", parent=parent)
+        super().__init__(
+            agent_id,
+            AgentRole.BUSINESS,
+            name=name or "business",
+            parent=parent,
+            knowledge_text=knowledge_text,
+        )
         self.llm = llm
 
     def run_task(self, task: Task) -> Task:
@@ -47,10 +54,13 @@ class BusinessAgent(BaseAgent):
         return task
 
     def _ask_llm(self, text: str) -> str:
+        system = BUSINESS_SYSTEM_PROMPT
+        if self.knowledge_text:
+            system += "\n\n" + self.knowledge_text
         try:
             response = self.llm.completion(
                 [
-                    {"role": "system", "content": BUSINESS_SYSTEM_PROMPT},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": text or "(空任务)"},
                 ]
             )

@@ -24,6 +24,7 @@ from agent.core.agents.base_agent import (
 )
 from agent.core.agents.orchestrator import Orchestrator
 from agent.core.llm import LLM
+from agent.core.skills.library import SkillLibrary, format_skills_block
 from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.utils.stream import StreamEvents, StreamMessage
 
@@ -46,11 +47,21 @@ class MainAgent(BaseAgent):
         llm: Optional[LLM] = None,
         name: str = "",
         parent: Optional[BaseAgent] = None,
+        skill_library: Optional[SkillLibrary] = None,
+        knowledge_text: str = "",
     ) -> None:
-        super().__init__(agent_id, AgentRole.MAIN, name=name or "main", parent=parent)
+        super().__init__(
+            agent_id,
+            AgentRole.MAIN,
+            name=name or "main",
+            parent=parent,
+            knowledge_text=knowledge_text,
+        )
         self.tool_calling_llm = tool_calling_llm
         self.orchestrator = orchestrator
         self.llm = llm
+        # US3 FR-006/007：技能库与环境知识，注入终局归纳 LLM 系统提示。
+        self.skill_library = skill_library
 
     @property
     def multi_agent(self) -> bool:
@@ -90,10 +101,17 @@ class MainAgent(BaseAgent):
         """终局决策：LLM 归纳；无 LLM/失败时回退归并原文。"""
         if self.llm is None:
             return merged
+        system = MAIN_SYSTEM_PROMPT
+        if self.skill_library is not None:
+            block = format_skills_block(self.skill_library.match(text))
+            if block:
+                system += "\n\n" + block
+        if self.knowledge_text:
+            system += "\n\n" + self.knowledge_text
         try:
             response = self.llm.completion(
                 [
-                    {"role": "system", "content": MAIN_SYSTEM_PROMPT},
+                    {"role": "system", "content": system},
                     {
                         "role": "user",
                         "content": f"原始任务: {text}\n\n编排结果:\n{merged}",

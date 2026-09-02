@@ -60,12 +60,15 @@ class BaseAgent(ABC):
         role: AgentRole,
         name: str = "",
         parent: Optional["BaseAgent"] = None,
+        knowledge_text: str = "",
     ) -> None:
         self.agent_id = agent_id
         self.role = role
         self.name = name or f"{role.value}-{agent_id}"
         self.parent = parent
         self.context: List[Message] = []
+        # US3 FR-007：环境/知识上下文，注入该角色的 LLM 提示词（无 LLM 的角色忽略）。
+        self.knowledge_text = knowledge_text
 
     # ---- 上下文管理 ----
     def add_context(self, message: Message) -> None:

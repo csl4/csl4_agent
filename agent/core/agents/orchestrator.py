@@ -33,7 +33,9 @@ from agent.core.agents.base_agent import (
 )
 from agent.core.agents.business_agent import BusinessAgent
 from agent.core.agents.subagent import SHELL_COMMAND_PREFIXES, SubAgent
+from agent.core.history.store import HistoryStore
 from agent.core.llm import LLM
+from agent.core.skills.library import SkillLibrary, format_skills_block
 from agent.core.tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -86,15 +88,26 @@ class Orchestrator(BaseAgent):
         worker_factory: Optional[Callable[[str, str], BaseAgent]] = None,
         name: str = "",
         parent: Optional[BaseAgent] = None,
+        skill_library: Optional[SkillLibrary] = None,
+        knowledge_text: str = "",
+        history: Optional[HistoryStore] = None,
     ) -> None:
         super().__init__(
-            agent_id, AgentRole.ORCHESTRATOR, name=name or "orchestrator", parent=parent
+            agent_id,
+            AgentRole.ORCHESTRATOR,
+            name=name or "orchestrator",
+            parent=parent,
+            knowledge_text=knowledge_text,
         )
         self.llm = llm
         self.tool_executor = tool_executor
         self.max_subagents = max_subagents
         # worker_factory(kind, agent_id) -> BaseAgent；默认按 kind 造 SubAgent/BusinessAgent。
         self.worker_factory = worker_factory or self._default_worker
+        # US3 FR-006/007：技能库与环境知识，注入编排 LLM 系统提示。
+        self.skill_library = skill_library
+        # US3 FR-008：会话/命令历史库，传递给命令 SubAgent 落执行记录。
+        self.history = history
         self.last_records: List[Dict[str, Any]] = []
 
     # ---- worker 工厂 ----
@@ -107,9 +120,14 @@ class Orchestrator(BaseAgent):
                 tool_executor=self.tool_executor,
                 name=f"sub-{agent_id}",
                 parent=self,
+                history=self.history,
             )
         return BusinessAgent(
-            agent_id=agent_id, llm=self.llm, name=f"biz-{agent_id}", parent=self
+            agent_id=agent_id,
+            llm=self.llm,
+            name=f"biz-{agent_id}",
+            parent=self,
+            knowledge_text=self.knowledge_text,
         )
 
     # ---- 拆解 ----
@@ -121,11 +139,23 @@ class Orchestrator(BaseAgent):
                 return plan
         return self._decompose_heuristic(text)
 
+    def _build_system_prompt(self, text: str) -> str:
+        """编排系统提示 + 命中的技能（FR-006）+ 环境知识（FR-007）。"""
+        system = ORCHESTRATOR_SYSTEM_PROMPT
+        if self.skill_library is not None:
+            matched = self.skill_library.match(text)
+            block = format_skills_block(matched)
+            if block:
+                system += "\n\n" + block
+        if self.knowledge_text:
+            system += "\n\n" + self.knowledge_text
+        return system
+
     def _plan_with_llm(self, text: str) -> List[Dict[str, str]]:
         try:
             response = self.llm.completion(
                 [
-                    {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT},
+                    {"role": "system", "content": self._build_system_prompt(text)},
                     {"role": "user", "content": text or "(空任务)"},
                 ]
             )
