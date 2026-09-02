@@ -121,13 +121,15 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
             process.kill()
 
 
-def _popen(bash_path: str, cmd: str) -> subprocess.Popen:
+def _popen(bash_path: str, cmd: str, cwd: str = "") -> subprocess.Popen:
     """以适配平台的方式启动 bash 子进程。
 
     注意：在 Windows 上，shell=True 搭配 executable=bash_path 会运行
     `bash /c <cmd>` —— shell=True 的前缀 "/c" 会被当作路径而不是标志传给
     bash —— 因此在所有平台上，命令总是显式以 `bash -c <cmd>` 配合 shell=False
     传入。
+
+    可选 `cwd` 受控工作目录（沙箱隔离用，FR-004）。
     """
     popen_kwargs: dict = dict(
         stdout=subprocess.PIPE,
@@ -136,13 +138,17 @@ def _popen(bash_path: str, cmd: str) -> subprocess.Popen:
         encoding="utf-8",
         errors="replace",
     )
+    if cwd:
+        popen_kwargs["cwd"] = cwd
     if sys.platform != "win32":
         # POSIX: start a new session so the whole process group can be killed.
         popen_kwargs["start_new_session"] = True
     return subprocess.Popen([bash_path, "-c", cmd], shell=False, **popen_kwargs)
 
 
-def execute_bash_command(cmd: str, timeout: int, bash_path: str = "") -> BashResult:
+def execute_bash_command(
+    cmd: str, timeout: int, bash_path: str = "", cwd: str = ""
+) -> BashResult:
     # 对外唯一入口：解析 bash 路径 → 起子进程 → communicate 等结果/捕获超时。
     # 正常：返回 BashResult(return_code=退出码, timed_out=False)；
     # 超时：_kill_process_tree 杀整树后收尾，返回 BashResult(return_code=None, timed_out=True)。
@@ -153,13 +159,14 @@ def execute_bash_command(cmd: str, timeout: int, bash_path: str = "") -> BashRes
         cmd: 要执行的 bash 命令
         timeout: 超时秒数
         bash_path: 可选的显式 bash 可执行文件路径（为空时自动检测）
+        cwd: 可选的受控工作目录（为空时继承当前目录）
 
     返回:
         携带 stdout、return_code 和 timed_out 标志的 BashResult
     """
     resolved_bash = find_bash_executable(bash_path)
     logger.debug(f"Executing bash command via {resolved_bash}: {cmd}")
-    process = _popen(resolved_bash, cmd)
+    process = _popen(resolved_bash, cmd, cwd=cwd)
 
     try:
         stdout, _ = process.communicate(timeout=timeout)

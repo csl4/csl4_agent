@@ -87,16 +87,16 @@ description: "Task list for 多Agent CLI 框架 (multi-agent-cli)"
 
 ### Tests for User Story 2（宪法 IV 强制）⚠️
 
-- [ ] T020 [P] [US2] 单测终端探测与命令映射（三终端同义命令）在 `tests/unit/test_terminal.py`
-- [ ] T021 [P] [US2] 集成测试沙箱执行 + 高风险命令确认/拦截在 `tests/integration/test_safety_sandbox.py`
+- [X] T020 [P] [US2] 单测终端探测与命令映射（三终端同义命令）在 `tests/unit/test_terminal.py`
+- [X] T021 [P] [US2] 集成测试沙箱执行 + 高风险命令确认/拦截在 `tests/integration/test_safety_sandbox.py`
 
 ### Implementation for User Story 2
 
-- [ ] T022 [P] [US2] 实现终端探测与命令映射 `agent/core/env/terminal.py`：检测 shell 类型、同义命令改写表（如 `ls`↔`Get-ChildItem`）、失败时以目标终端写法重试（tenacity，research.md §5）
-- [ ] T023 [P] [US2] 实现轻量沙箱 toolset `agent/plugins/toolsets/sandbox/sandbox_toolset.py`：子进程隔离 + 超时 + 受控工作目录 + 资源上限；在 `agent/plugins/toolsets/__init__.py` 的 BUILTIN_PYTHON_TOOLSETS 注册（宪法 I 插件优先，research.md §4）
-- [ ] T024 [US2] 接线安全防护：高风险命令经现有 bash toolset 审批层 + 沙箱执行（FR-003）；沙箱不可用 → 明确错误提示而非静默失败（FR-004）
-- [ ] T025 [US2] 暴露沙箱/超时配置 `agent/config.py`（`multi_agent.sandbox`，见 contracts/config.md）
-- [ ] T026 [US2] 终端适配接入命令执行路径：SubAgent/命令执行前探测 shell 并按映射改写（FR-002）
+- [X] T022 [P] [US2] 实现终端探测与命令映射 `agent/core/env/terminal.py`：检测 shell 类型、同义命令改写表（如 `ls`↔`Get-ChildItem`）、失败时以目标终端写法重试（tenacity，research.md §5）
+- [X] T023 [P] [US2] 实现轻量沙箱 toolset `agent/plugins/toolsets/sandbox/sandbox_toolset.py`：子进程隔离 + 超时 + 受控工作目录 + 资源上限；在 `agent/plugins/toolsets/__init__.py` 的 BUILTIN_PYTHON_TOOLSETS 注册（宪法 I 插件优先，research.md §4）
+- [X] T024 [US2] 接线安全防护：高风险命令经现有 bash toolset 审批层 + 沙箱执行（FR-003）；沙箱不可用 → 明确错误提示而非静默失败（FR-004）
+- [X] T025 [US2] 暴露沙箱/超时配置 `agent/config.py`（`multi_agent.sandbox`，见 contracts/config.md）
+- [X] T026 [US2] 终端适配接入命令执行路径：SubAgent/命令执行前探测 shell 并按映射改写（FR-002）
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
 

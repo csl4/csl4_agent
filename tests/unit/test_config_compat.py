@@ -77,3 +77,32 @@ class TestMultiAgentConfig:
         monkeypatch.setenv("AGENT_MULTI_AGENT", "not-a-bool")
         config = Config(config_path=tmp_path / "missing.yaml")
         assert config.multi_agent_settings()["enabled"] is False
+
+
+class TestSandboxConfig:
+    def test_multi_agent_sandbox_overrides_top_level(self, tmp_path: Path) -> None:
+        """multi_agent.sandbox 覆盖顶层 sandbox:（T025，contracts/config.md）。"""
+        path = _write_config(
+            tmp_path,
+            "multi_agent:\n  sandbox:\n    timeout_seconds: 60\n",
+        )
+        config = Config(config_path=path)
+        settings = config.sandbox_settings()
+        assert settings["timeout_seconds"] == 60
+        assert settings["type"] == "lightweight"  # 未覆盖项回退默认
+        # 顶层 `sandbox:` 也被合并（工具集工厂读取顶层段）
+        assert config.data["sandbox"]["timeout_seconds"] == 60
+
+    def test_top_level_sandbox_defaults(self, tmp_path: Path) -> None:
+        """只有顶层 sandbox: 段时，默认值生效。"""
+        path = _write_config(tmp_path, "sandbox:\n  type: lightweight\n")
+        config = Config(config_path=path)
+        assert config.data["sandbox"]["timeout_seconds"] == 30
+        assert config.sandbox_settings()["type"] == "lightweight"
+
+    def test_no_sandbox_config_defaults(self, tmp_path: Path) -> None:
+        """无任何 sandbox 配置 → 默认 lightweight 沙箱。"""
+        config = Config(config_path=tmp_path / "missing.yaml")
+        settings = config.sandbox_settings()
+        assert settings["type"] == "lightweight"
+        assert settings["timeout_seconds"] == 30

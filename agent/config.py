@@ -48,6 +48,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     # Per-toolset config sections; see each toolset's config class for fields.
     "bash": {},
+    "sandbox": {
+        # 轻量沙箱工具集（US2 FR-003/004）；multi_agent.sandbox 可覆盖同名项。
+        "type": "lightweight",  # v1: lightweight；后续 container
+        "timeout_seconds": 30,
+        "working_dir": "",
+        "builtin_allowlist": "extended",
+    },
     "toolsets": [],
     # 多Agent 编排配置（宪法 III：新增字段，不改动既有字段名，向后兼容）。
     "multi_agent": {
@@ -102,6 +109,10 @@ class Config:
             "AGENT_MAX_SUBAGENTS", config["multi_agent"]["max_subagents"]
         )
 
+        # 沙箱配置：顶层 `sandbox:`（工具集工厂读取）与 `multi_agent.sandbox`
+        # 合并，multi_agent.sandbox 优先（T025，contracts/config.md）。
+        config["sandbox"] = self._merge_sandbox(config)
+
         return config
 
     @staticmethod
@@ -143,6 +154,18 @@ class Config:
         merged = dict(DEFAULT_CONFIG["multi_agent"])
         merged.update(settings)
         return merged
+
+    @staticmethod
+    def _merge_sandbox(config: Dict[str, Any]) -> Dict[str, Any]:
+        """合并顶层 `sandbox:` 与 `multi_agent.sandbox`，后者优先（T025）。"""
+        merged = dict(DEFAULT_CONFIG["sandbox"])
+        merged.update(config.get("sandbox") or {})
+        merged.update((config.get("multi_agent") or {}).get("sandbox") or {})
+        return merged
+
+    def sandbox_settings(self) -> Dict[str, Any]:
+        """返回合并后的沙箱配置（multi_agent.sandbox 覆盖顶层 sandbox:）。"""
+        return self._merge_sandbox(self.data)
 
     def create_llm(self) -> LLM:
         """根据配置创建 LLM provider。"""

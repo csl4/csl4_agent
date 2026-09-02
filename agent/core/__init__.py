@@ -38,6 +38,14 @@ from agent.core.agents import (
     merge_results,
     run_task_safe,
 )
+# 环境适配：跨终端探测/改写/执行（US2 FR-002）。
+from agent.core.env.terminal import (
+    ShellResult,
+    TerminalType,
+    adapt_command,
+    detect_shell,
+    execute_in_shell,
+)
 
 __all__ = [
     "A2AClient",
@@ -60,10 +68,13 @@ __all__ = [
     "Orchestrator",
     "Prerequisite",
     "PromptComponent",
+    "ShellResult",
     "StructuredToolResult",
     "StructuredToolResultStatus",
     "SubAgent",
+    "TerminalType",
     "Tool",
+    "adapt_command",
     "ToolCallResult",
     "ToolCallingLLM",
     "ToolExecutor",
@@ -74,6 +85,8 @@ __all__ = [
     "ToolsetTag",
     "ToolsetType",
     "Transformer",
+    "detect_shell",
+    "execute_in_shell",
     "merge_results",
     "run_task_safe",
 ]

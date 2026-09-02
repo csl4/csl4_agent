@@ -2,12 +2,16 @@
 
 SubAgent 把子任务文本映射为一次 ToolExecutor.execute_tool 调用并收集结果：
 - 结构化描述符 `{"tool": "...", "params": {...}}` → 精确指定工具与参数；
-- 否则若文本以已知 shell 命令开头 → 经 bash 工具执行（带前缀审批语义）；
+- 否则若文本以已知 shell 命令开头 → 经命令工具执行（带前缀审批语义）；
 - 其余 → 视为无法执行，标记 FAILED。
 
-命令经现有 bash toolset 的审批/校验层（user_approved=False），因此
-未经白名单放行的命令会得到 APPROVAL_REQUIRED，由编排层如实记录，
-绝不静默执行（与 US2 安全防护一致）。
+命令执行（US2，FR-002/003/004）：
+- 命令子任务优先走轻量沙箱工具（sandbox：审批层 + 子进程隔离 + 超时 +
+  受控工作目录），未注册时回退 bash（US1 行为不变）；
+- 执行前探测终端并把检测结果随参数传入，由沙箱按目标终端改写同义命令
+  （FR-002）；
+- 命令经审批/校验层（user_approved=False），未经白名单放行的命令会得到
+  APPROVAL_REQUIRED，由编排层如实记录，绝不静默执行。
 """
 
 import json
@@ -17,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.core.a2a.protocol import Task, TaskState, set_task_state
 from agent.core.agents.base_agent import AgentRole, BaseAgent, task_input_text
+from agent.core.env.terminal import detect_shell
 from agent.core.models import (
     StructuredToolResultStatus,
     ToolCallResult,
@@ -99,6 +104,13 @@ class SubAgent(BaseAgent):
         )
         return self._complete_from_result(task, result)
 
+    def _pick_command_tool(self) -> Optional[str]:
+        """命令子任务优先走轻量沙箱工具；未注册时回退 bash（US1 行为不变）。"""
+        for name in ("sandbox", "bash"):
+            if self.tool_executor.get_tool_by_name(name) is not None:
+                return name
+        return None
+
     def _resolve_execution(self, text: str) -> Tuple[Optional[str], Dict[str, Any]]:
         """把子任务文本解析为 (tool_name, params)；无法解析时返回 (None, {})。"""
         descriptor = parse_subtask_descriptor(text)
@@ -109,9 +121,14 @@ class SubAgent(BaseAgent):
         if stripped:
             first = stripped.split()[0].lower()
             if first in SHELL_COMMAND_PREFIXES:
-                return "bash", {
+                tool_name = self._pick_command_tool()
+                if tool_name is None:
+                    return None, {}
+                # FR-002：探测终端并随参数传入，命令工具按目标终端改写执行。
+                return tool_name, {
                     "command": stripped,
                     "suggested_prefixes": command_prefixes_for(stripped),
+                    "shell": detect_shell().value,
                 }
         return None, {}
 

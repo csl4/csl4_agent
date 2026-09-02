@@ -19,6 +19,7 @@ from typing import Callable, Dict, Optional
 from agent.core.tools import Toolset
 from agent.plugins.toolsets.bash import create_bash_toolset
 from agent.plugins.toolsets.filesystem import create_filesystem_toolset
+from agent.plugins.toolsets.sandbox import create_sandbox_toolset
 
 # Builtin Python toolset factories, keyed by the config.yaml section that
 # configures them. Each takes an optional install_config dict and returns a
@@ -26,4 +27,5 @@ from agent.plugins.toolsets.filesystem import create_filesystem_toolset
 BUILTIN_PYTHON_TOOLSETS: Dict[str, Callable[[Optional[Dict]], Optional[Toolset]]] = {
     "filesystem": create_filesystem_toolset,
     "bash": create_bash_toolset,
+    "sandbox": create_sandbox_toolset,  # US2：轻量沙箱（FR-003/004）
 } # 工具集
