@@ -136,6 +136,24 @@ def set_task_state(
     return task
 
 
+def fail_task(task: Task, message: str) -> Task:
+    """把 Task 置为 FAILED 并写失败消息（统一失败落地路径，C1 收敛）。
+
+    客户端兜底 / 批量调度等各失败边界共用，避免各处重复手写 set_task_state。
+    """
+    return set_task_state(task, TaskState.TASK_STATE_FAILED, message)
+
+
+def task_message_text(task: Task) -> str:
+    """Task 状态消息的全部文本 Part 拼接（运行结果文本，区别于输入）。
+
+    供 a2a.client 与 agents.base_agent 统一提取（B2 去重，单一来源）。
+    """
+    if not task.status.HasField("message"):
+        return ""
+    return "\n".join(p.text for p in task.status.message.parts if p.HasField("text"))
+
+
 def task_to_json(task: Task) -> str:
     """Task 序列化为 JSON（调试/持久化）。"""
     return MessageToJson(task)

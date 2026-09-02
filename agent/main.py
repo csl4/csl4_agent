@@ -145,10 +145,6 @@ def _create_multi_agent(config: Config) -> MainAgent:
     tool_executor = config.create_tool_executor(
         toolset_tag_filter=CLI_TAG_FILTER,
     )
-    tool_calling_llm = config.create_tool_calling_llm(
-        tool_executor=tool_executor,
-        llm=llm,
-    )
     history = HistoryStore()
     skill_library = SkillLibrary()
     knowledge_text = format_env_info(
@@ -165,7 +161,6 @@ def _create_multi_agent(config: Config) -> MainAgent:
     )
     return MainAgent(
         agent_id="main",
-        tool_calling_llm=tool_calling_llm,
         orchestrator=orchestrator,
         llm=llm,
         skill_library=skill_library,
@@ -620,11 +615,7 @@ def chat(
         print_banner(
             model=config.data["llm"]["model"],
             tool_count=len(tool_executor.tools_by_name) if tool_executor else 0,
-            compaction_enabled=(
-                main_agent.tool_calling_llm.enable_compaction
-                if main_agent.tool_calling_llm
-                else False
-            ),
+            compaction_enabled=config.data["agent"].get("enable_compaction", True),
         )
         print_hint(
             "多Agent 编排模式：主/编排/业务/SubAgent 协作。"

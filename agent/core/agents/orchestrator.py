@@ -29,6 +29,7 @@ from agent.core.agents.base_agent import (
     AgentRole,
     BaseAgent,
     SubtaskResult,
+    subtask_dicts,
     task_input_text,
     task_state_text,
 )
@@ -254,20 +255,7 @@ class Orchestrator(BaseAgent):
         if not task.status.HasField("message"):
             return
         task.status.message.parts.append(
-            make_data_part(
-                {
-                    "subtasks": [
-                        {
-                            "index": r.index,
-                            "kind": r.kind,
-                            "text": r.text,
-                            "worker": r.worker,
-                            "state": r.state,
-                        }
-                        for r in records
-                    ]
-                }
-            )
+            make_data_part({"subtasks": subtask_dicts(records)})
         )
 
 

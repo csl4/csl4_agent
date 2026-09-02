@@ -27,10 +27,12 @@ from agent.core.a2a.protocol import (
     Task,
     TaskState,
     copy_task,
+    fail_task,
     is_failed,
     is_terminal,
     make_task,
     set_task_state,
+    task_message_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,13 +60,6 @@ class A2AClient(ABC):
 
         每次 yield 的都是深拷贝快照，调用方可安全持有而不会随任务推进被改写。
         """
-
-
-def _task_message_text(task: Task) -> str:
-    """Task 状态消息的文本（供 A2AClientError 描述用）。"""
-    if not task.status.HasField("message"):
-        return ""
-    return "\n".join(p.text for p in task.status.message.parts if p.HasField("text"))
 
 
 class InProcessA2AClient(A2AClient):
@@ -110,16 +105,12 @@ class InProcessA2AClient(A2AClient):
             result = self.target.run_task(task)
         except Exception as exc:  # noqa: BLE001 - 兜底标记 FAILED，不向上抛原始异常
             logger.exception("target.run_task raised: %s", exc)
-            set_task_state(task, TaskState.TASK_STATE_FAILED, f"run_task raised: {exc}")
-            result = task
+            result = fail_task(task, f"run_task raised: {exc}")
         if not is_terminal(result.status.state):
-            set_task_state(
-                result, TaskState.TASK_STATE_FAILED, "run_task 返回了非终止状态"
-            )
-            result = task
+            result = fail_task(result, "run_task 返回了非终止状态")
         if is_failed(result.status.state):
             raise A2AClientError(
-                f"Task {result.id} failed: {_task_message_text(result) or result.status.state}"
+                f"Task {result.id} failed: {task_message_text(result) or result.status.state}"
             )
         return result
 

@@ -1,10 +1,11 @@
-"""主 Agent：现有单 Agent 的包装 + 多Agent 编排触发（FR-001 四角色之一）。
+"""主 Agent：多Agent 编排的用户主接口 + 终局归纳（FR-001 四角色之一）。
 
 职责：
-  ① 包装既有 ToolCallingLLM（单 Agent 行为保持不变，宪法 II）；
-  ② 多Agent 模式下触发编排（Orchestrator）并做终局归纳；
-  ③ 对 CLI 暴露与 ToolCallingLLM 一致的 `call_stream()`，多Agent 事件
-     向后兼容地并入 StreamMessage 事件流（T017/T018）。
+  ① 触发编排（Orchestrator 拆解/并行调度）并做终局归纳；
+  ② 对 CLI 暴露与 ToolCallingLLM 一致的 `call_stream()`，多Agent 事件
+     向后兼容地并入 StreamMessage 事件流（T017/T018）；
+  ③ 未装配编排时退化为单 Agent 兜底直答（防御性，生产单 Agent 走
+     ToolCallingLLM 直连，不经过本类）。
 
 调用方式：
 - `run_task(task)`：无头模式（测试/程序化调用），同步返回终止态 Task。
@@ -12,20 +13,21 @@
 """
 
 import logging
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from agent.core.a2a.client import A2AClientError, InProcessA2AClient
 from agent.core.a2a.protocol import Task, TaskState, set_task_state
 from agent.core.agents.base_agent import (
     AgentRole,
     BaseAgent,
+    message_text,
+    subtask_dicts,
     task_input_text,
     task_result_text,
 )
 from agent.core.agents.orchestrator import Orchestrator
 from agent.core.providers import LLM
 from agent.core.skills.library import SkillLibrary, format_skills_block
-from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.utils.stream import StreamEvents, StreamMessage
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,6 @@ class MainAgent(BaseAgent):
     def __init__(
         self,
         agent_id: str = "main",
-        tool_calling_llm: Optional[ToolCallingLLM] = None,
         orchestrator: Optional[Orchestrator] = None,
         llm: Optional[LLM] = None,
         name: str = "",
@@ -57,7 +58,6 @@ class MainAgent(BaseAgent):
             parent=parent,
             knowledge_text=knowledge_text,
         )
-        self.tool_calling_llm = tool_calling_llm
         self.orchestrator = orchestrator
         self.llm = llm
         # US3 FR-006/007：技能库与环境知识，注入终局归纳 LLM 系统提示。
@@ -73,8 +73,7 @@ class MainAgent(BaseAgent):
         text = task_input_text(task, self)
         if not self.multi_agent:
             return self._run_single_fallback(task, text)
-        merged = self._orchestrate(text)
-        final_text = self._finalize(text, merged)
+        _, final_text = self._run_orchestration(text)
         set_task_state(task, TaskState.TASK_STATE_COMPLETED, final_text)
         return task
 
@@ -96,6 +95,15 @@ class MainAgent(BaseAgent):
         except A2AClientError as exc:
             logger.warning("编排失败: %s", exc)
             return f"编排失败: {exc}"
+
+    def _run_orchestration(self, text: str) -> Tuple[str, str]:
+        """执行完整编排流水线：触发编排 + 终局归纳，返回 (merged, final_text)。
+
+        无头模式（run_task）与 CLI 模式（call_stream）共用同一条编排管道，
+        避免两处调用链漂移（A3 去重）。
+        """
+        merged = self._orchestrate(text)
+        return merged, self._finalize(text, merged)
 
     def _finalize(self, text: str, merged: str) -> str:
         """终局决策：LLM 归纳；无 LLM/失败时回退归并原文。"""
@@ -135,38 +143,17 @@ class MainAgent(BaseAgent):
         tool_number_offset: int = 0,
         iteration_offset: int = 0,
     ) -> Generator[StreamMessage, None, None]:
-        if not self.multi_agent:
-            if self.tool_calling_llm is not None:
-                yield from self.tool_calling_llm.call_stream(
-                    messages=messages,
-                    enable_tool_approval=enable_tool_approval,
-                    tool_decisions=tool_decisions,
-                    frontend_tool_results=frontend_tool_results,
-                    request_context=request_context,
-                    cancel_event=cancel_event,
-                    tool_number_offset=tool_number_offset,
-                    iteration_offset=iteration_offset,
-                )
-            else:
-                user_text = self._last_user_text(messages)
-                yield StreamMessage(
-                    event=StreamEvents.ANSWER_END,
-                    data={"content": user_text or "(空)", "messages": list(messages)},
-                )
-            return
-
         user_text = self._last_user_text(messages)
         yield StreamMessage(
             event=StreamEvents.MULTI_AGENT_DECOMPOSE, data={"task": user_text}
         )
 
-        merged = self._orchestrate(user_text)
+        _, final_text = self._run_orchestration(user_text)
         for record in self._subtask_events():
             yield StreamMessage(
                 event=StreamEvents.MULTI_AGENT_SUBAGENT, data=record
             )
 
-        final_text = self._finalize(user_text, merged)
         yield StreamMessage(
             event=StreamEvents.MULTI_AGENT_DONE,
             data={"content": final_text, "task": user_text},
@@ -180,20 +167,11 @@ class MainAgent(BaseAgent):
         )
 
     def _subtask_events(self) -> List[Dict[str, Any]]:
-        """把最近一次编排的子任务明细转成流事件数据。"""
+        """把最近一次编排的子任务明细转成流事件数据（统一序列化，B1）。"""
         orchestrator = self.orchestrator
         if orchestrator is None:
             return []
-        return [
-            {
-                "index": r.index,
-                "kind": r.kind,
-                "text": r.text,
-                "worker": r.worker,
-                "state": r.state,
-            }
-            for r in orchestrator.last_records
-        ]
+        return subtask_dicts(orchestrator.last_records)
 
     @staticmethod
     def _last_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -201,14 +179,7 @@ class MainAgent(BaseAgent):
         for msg in reversed(messages):
             if not isinstance(msg, dict) or msg.get("role") != "user":
                 continue
-            content = msg.get("content") or ""
-            if isinstance(content, list):
-                return " ".join(
-                    str(c.get("text", ""))
-                    for c in content
-                    if isinstance(c, dict)
-                ).strip()
-            return str(content)
+            return message_text(msg.get("content") or "")
         return ""
 
 

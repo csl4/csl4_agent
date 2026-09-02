@@ -21,10 +21,12 @@ from agent.core.a2a.protocol import (
     FAILED_STATES,
     Task,
     TaskState,
+    fail_task,
     is_failed,
     is_terminal,
     make_task,
     set_task_state,
+    task_message_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,18 @@ class SubtaskResult:
             "state": self.state,
             "result": self.result,
         }
+
+
+def subtask_dicts(records: List[SubtaskResult]) -> List[Dict[str, Any]]:
+    """把 SubtaskResult 记录序列化为事件/data Part 用 dict（不含 result）。
+
+    供 Orchestrator._attach_subtasks 与 MainAgent._subtask_events 统一使用，
+    以 to_dict() 为单一序列化来源（B1 去重，避免两处手写同构 dict）。
+    """
+    return [
+        {k: v for k, v in r.to_dict().items() if k != "result"}
+        for r in records
+    ]
 
 
 # 默认重试策略：最多 3 次，指数退避（宪法 V：重试走 tenacity）
@@ -117,7 +131,7 @@ class BaseAgent(ABC):
         """上下文文本视图（供 LLM 提示词使用）。"""
         lines = []
         for msg in self.context:
-            text = _message_text(msg.get("content") if isinstance(msg, dict) else "")
+            text = message_text(msg.get("content") if isinstance(msg, dict) else "")
             if text:
                 lines.append(f"[{msg.get('role', '?')}] {text}")
         return "\n".join(lines)
@@ -149,20 +163,6 @@ class BaseAgent(ABC):
         - 失败 → `set_task_state(task, TASK_STATE_FAILED, ...)`，调用方可用 tenacity 重试
         """
 
-    def _run_task_with_retry(self, task: Task) -> Task:
-        """带重试地执行 run_task：失败态自动重试，终止态直接返回。"""
-        if is_terminal(task.status.state):
-            return task
-
-        @RETRY_DECORATOR
-        def _run() -> Task:
-            result = self.run_task(task)
-            if is_failed(result.status.state):
-                raise RuntimeError(f"Task {result.id} failed: {task_state_text(result)}")
-            return result
-
-        return _run()
-
     # ---- 帮助方法 ----
     def task_card(self) -> str:
         """给 LLM/CLI 看的 Agent 自描述（对齐 A2A AgentCard 的语义字段）。"""
@@ -185,15 +185,18 @@ def task_state_text(task: Task) -> str:
 
 
 def task_result_text(task: Task) -> str:
-    """Task 的完成/失败消息文本（运行结果，区别于输入文本）。"""
-    if not task.status.HasField("message"):
-        return ""
-    parts = [p.text for p in task.status.message.parts if p.HasField("text")]
-    return "\n".join(parts)
+    """Task 的完成/失败消息文本（运行结果，区别于输入文本）。
+
+    委托 a2a.protocol.task_message_text（单一提取来源，B2 去重）。
+    """
+    return task_message_text(task)
 
 
-def _message_text(content: Any) -> str:
-    """从 OpenAI 风格消息 content 提取纯文本（兼容 str 与多模态 list）。"""
+def message_text(content: Any) -> str:
+    """从 OpenAI 风格消息 content 提取纯文本（兼容 str 与多模态 list）。
+
+    供 context_text / MainAgent._last_user_text 等统一使用（B3 去重）。
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -231,14 +234,11 @@ def run_task_safe(agent: BaseAgent, task: Task) -> Task:
     try:
         result = agent.run_task(task)
         if not is_terminal(result.status.state):
-            set_task_state(
-                result, TaskState.TASK_STATE_FAILED, "run_task returned non-terminal state"
-            )
+            fail_task(result, "run_task returned non-terminal state")
         return result
     except Exception as exc:  # noqa: BLE001 - 编排层兜底，不向上抛
         logger.exception("agent %s run_task raised: %s", agent.name, exc)
-        set_task_state(task, TaskState.TASK_STATE_FAILED, f"run_task raised: {exc}")
-        return task
+        return fail_task(task, f"run_task raised: {exc}")
 
 
 # 供 retry 判定使用的别名（保持 FAILED_STATES 单一来源可被测试引用）
@@ -247,7 +247,9 @@ __all__ = [
     "BaseAgent",
     "FAILED_STATES",
     "SubtaskResult",
+    "message_text",
     "run_task_safe",
+    "subtask_dicts",
     "task_input_text",
     "task_result_text",
     "task_state_text",

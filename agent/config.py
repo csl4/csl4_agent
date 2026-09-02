@@ -60,7 +60,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "multi_agent": {
         "enabled": False,  # 默认关闭，保持单Agent 行为
         "max_subagents": 4,  # 单任务最大并行 SubAgent 数
-        "orchestrator_model": "",  # 空则复用 llm.model
+        "orchestrator_model": "deepseek/deepseek-v4-flash",  # 空则复用 llm.model
         "a2a": {"transport": "in-process"},
         "sandbox": {"type": "lightweight", "timeout_seconds": 30, "working_dir": ""},
     },
