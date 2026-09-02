@@ -1,22 +1,16 @@
-"""为智能体提供提示词构建工具，支持多层组装。
-
-系统提示词由相互独立的组件组装而成，每个组件均可通过
-PromptComponent 枚举 + behavior_controls 字典单独开关。这样不同的
-部署场景（CLI 与 server）就可以包含不同的提示词片段。
-"""
+"""为智能体提供系统提示词组装与工具清单渲染。"""
 
 # ======================= 中文导览 =======================
 # 本文件是【系统提示词组装器】：
-#   build_system_prompt → 依次拼装 8 个独立组件(见 prompt_components.py)，成完整 system prompt。
+#   build_system_prompt → 依次拼装 8 个独立组件(见 components.py)，成完整 system prompt。
 #                         每个组件可按 behavior_controls 独立开关、按 custom_components 覆盖。
-#   build_user_prompt   → 把用户问句(+可选图片)拼成 user 消息的 content parts(支持多模态)。
 #   build_tools_description → 把 toolsets 渲染成人类可读的工具清单，塞进 TOOLSET_INSTRUCTIONS。
 # 设计理念：提示词拆成「表驱动」的组件，适配 CLI / server 不同部署只需开关组件而非改 prompt 文本。
 # =========================================================
 
 from typing import Any, Dict, List, Optional
 
-from agent.core.prompt_components import (
+from agent.core.prompts.components import (
     DEFAULT_PROMPT_COMPONENTS,
     PROMPT_COMPONENT_ORDER,
     PromptComponent,
@@ -196,29 +190,7 @@ def build_system_prompt(
     return "\n\n".join(parts)
 
 
-def build_user_prompt(
-    user_input: str,
-    images: Optional[List[Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
-    """构建用户消息，可选择附带图片。
-
-    参数:
-        user_input: 用户的文本输入。
-        images: 可选的图片字典列表，包含 'url' 或 'base64' 键。
-
-    返回:
-        用户消息的 content parts 列表。
-    """
-    content: List[Dict[str, Any]] = [{"type": "text", "text": user_input}]
-
-    if images:
-        for img in images:
-            if "url" in img:
-                content.append({"type": "image_url", "image_url": {"url": img["url"]}})
-            elif "base64" in img:
-                data_uri = f"data:image/{img.get('format', 'png')};base64,{img['base64']}"
-                content.append({"type": "image_url", "image_url": {"url": data_uri}})
-
-    return content
-
-
+__all__ = [
+    "build_system_prompt",
+    "build_tools_description",
+]

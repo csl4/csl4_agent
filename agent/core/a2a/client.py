@@ -7,11 +7,13 @@
 
 设计要点：
 - 本模块**不依赖 agents 层**（避免 a2a ↔ agents 循环导入）：目标只做
-  鸭子类型（需 `run_task(task) -> Task`、`add_context(Message)`、
-  `agent_id` / `name` 属性），即 BaseAgent 的实现天然满足。
+  鸭子类型（需 `run_task(task) -> Task`、`add_context(dict)`、
+  `record_task_input(task_id, text)`、`agent_id` / `name` 属性），
+  即 BaseAgent 的实现天然满足。
 - `send_task` 失败按 tenacity 策略自动重试（宪法 V：重试走 tenacity）。
-- 任务文本以 ROLE_USER Message 写入目标 Agent 的上下文窗口；
-  执行异常由本客户端兜底标记 FAILED，不向调用方抛原始异常。
+- 任务文本以 OpenAI 风格 user 消息字典写入目标上下文，原始输入另存
+  `task_inputs` 注册表（`task_input_text` 优先读取）；执行异常由本客户端
+  兜底标记 FAILED，不向调用方抛原始异常。
 """
 
 import logging
@@ -22,13 +24,11 @@ from typing import Any, Generator, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from agent.core.a2a.protocol import (
-    Role,
     Task,
     TaskState,
     copy_task,
     is_failed,
     is_terminal,
-    make_message,
     make_task,
     set_task_state,
 )
@@ -71,21 +71,21 @@ class InProcessA2AClient(A2AClient):
     """进程内 transport：直接驱动目标 Agent 的 `run_task`。
 
     目标做鸭子类型（BaseAgent 满足）：`run_task(task) -> Task`、
-    `add_context(Message)`、`agent_id` / `name` 属性。
+    `add_context(dict)`、`record_task_input(task_id, text)`、
+    `agent_id` / `name` 属性。
     """
 
     def __init__(self, target: Any):
         self.target = target
 
     def _new_task(self, task_text: str, task_id: str = "") -> Task:
-        """新建 SUBMITTED Task，并把任务文本作为 user 消息写入目标上下文。"""
+        """新建 SUBMITTED Task，并把任务文本写入目标上下文（user 消息 + 输入注册表）。"""
         tid = task_id or f"task-{self.target.agent_id}-{uuid.uuid4().hex[:8]}"
         task = make_task(tid)
-        self.target.add_context(
-            make_message(
-                Role.ROLE_USER, task_text, task_id=tid, context_id=task.context_id
-            )
-        )
+        self.target.add_context({"role": "user", "content": task_text})
+        record = getattr(self.target, "record_task_input", None)
+        if record is not None:
+            record(tid, task_text)
         return task
 
     def send_task(self, task_text: str, task_id: str = "") -> Task:
@@ -99,7 +99,7 @@ class InProcessA2AClient(A2AClient):
     )
     def _send_with_retry(self, task: Task) -> Task:
         # 每次尝试前把 Task 重置回 SUBMITTED（幂等可重放；task_input_text
-        # 优先读上下文里的 user 消息，因此重试不会误读上一次的输出）。
+        # 优先读 task_inputs 注册表里的原始输入，因此重试不会误读上一次的输出）。
         set_task_state(
             task,
             TaskState.TASK_STATE_SUBMITTED,

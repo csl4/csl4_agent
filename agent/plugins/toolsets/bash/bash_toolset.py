@@ -11,7 +11,8 @@
 #   RunBashCommand（本工具集的唯一工具）：
 #     - 覆写了 requires_approval()——按「命令段前缀」判断要否审批（危险/未知命令才要），
 #       区别于基类按工具名通配符的默认判断。
-#     - _invoke() 真正执行命令（execute_bash_command），并把结果 BashResult 转成 StructuredToolResult。
+#     - _invoke() 真正执行命令（execute_bash_command），并把结果 ShellResult 经
+#       shell_result_to_structured 转成 StructuredToolResult。
 #   安全分层：前缀命中白名单 → 直跑；未命中 → 需人工审批（并可记住前缀供后续免批）；
 #             命中黑名单/硬编码块/敏感路径/危险参数 → 一律拒绝且不可被审批豁免。
 # create_bash_toolset() 是工厂，tags=[CLI]，config 段走 `bash:`。
@@ -28,6 +29,7 @@ from agent.core.models import (
     StructuredToolResultStatus,
     ToolInvokeContext,
     ToolParameter,
+    shell_result_to_structured,
 )
 from agent.core.tools import (
     Tool,
@@ -37,7 +39,7 @@ from agent.core.tools import (
     Transformer,
 )
 from agent.core.transformers import LineCountTransformer
-from agent.plugins.toolsets.bash.common.bash import BashResult, execute_bash_command
+from agent.plugins.toolsets.bash.common.bash import execute_bash_command
 from agent.plugins.toolsets.bash.common.cli_prefixes import (
     load_cli_bash_tools_approved_prefixes,
 )
@@ -50,55 +52,6 @@ from agent.plugins.toolsets.bash.validation import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def bash_result_to_structured(
-    result: BashResult, cmd: str, timeout: int, params: dict
-) -> StructuredToolResult:
-    """
-    将 BashResult 转换为 StructuredToolResult。
-
-    参数:
-        result: 来自 execute_bash_command 的 BashResult
-        cmd: 原始命令(用于错误消息)
-        timeout: 超时值(用于错误消息)
-        params: 要包含在结果中的参数
-
-    返回:
-        适用于工具响应的 StructuredToolResult
-    """
-    if result.timed_out:
-        return StructuredToolResult(
-            status=StructuredToolResultStatus.ERROR,
-            error=f"Error: Command '{cmd}' timed out after {timeout} seconds.",
-            data=f"{cmd}\n{result.stdout}" if result.stdout else None,
-            params=params,
-            invocation=cmd,
-        )
-
-    result_data = f"{cmd}\n{result.stdout}"
-
-    if result.return_code == 0:
-        status = (
-            StructuredToolResultStatus.SUCCESS
-            if result.stdout
-            else StructuredToolResultStatus.NO_DATA
-        )
-        error = None
-    else:
-        status = StructuredToolResultStatus.ERROR
-        error = (
-            f'Error: Command "{cmd}" returned non-zero exit status {result.return_code}'
-        )
-
-    return StructuredToolResult(
-        status=status,
-        error=error,
-        data=result_data,
-        params=params,
-        invocation=cmd,
-        return_code=result.return_code,
-    )
 
 
 def _get_config(context: ToolInvokeContext) -> BashExecutorConfig:
@@ -310,7 +263,7 @@ class RunBashCommand(Tool):
                 params=params,
                 invocation=command_str,
             )
-        return bash_result_to_structured(result, command_str, int(timeout), params)
+        return shell_result_to_structured(result, command_str, int(timeout), params)
 
     def _build_deny_error_message(self, validation_result) -> str:
         """根据拒绝原因构建适当的错误消息。"""

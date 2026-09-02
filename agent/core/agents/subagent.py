@@ -16,12 +16,11 @@ SubAgent 把子任务文本映射为一次 ToolExecutor.execute_tool 调用并�
 
 import json
 import logging
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.core.a2a.protocol import Task, TaskState, set_task_state
 from agent.core.agents.base_agent import AgentRole, BaseAgent, task_input_text
-from agent.core.env.terminal import detect_shell
+from agent.core.env.terminal import detect_shell, split_command_segments
 from agent.core.history.store import HistoryStore
 from agent.core.models import (
     StructuredToolResultStatus,
@@ -60,11 +59,11 @@ def parse_subtask_descriptor(text: str) -> Optional[Dict[str, Any]]:
 def command_prefixes_for(command: str) -> List[str]:
     """从命令文本提取 suggested_prefixes（bash 工具要求，每段提供命令名前缀）。
 
-    取每个命令段（按 |、&&、; 分隔）的首词即可，与白名单的「命令名」粒度对齐。
+    取每个命令段（按 |、&&、;、换行 分隔）的首词即可，与白名单的「命令名」粒度对齐。
+    段切分复用 terminal.split_command_segments（命令段切分逻辑唯一化）。
     """
-    segments = re.split(r"\|\||&&|[|;&]", command or "")
     prefixes: List[str] = []
-    for seg in segments:
+    for seg in split_command_segments(command):
         words = seg.strip().split()
         if words:
             prefixes.append(words[0])
@@ -88,7 +87,7 @@ class SubAgent(BaseAgent):
         self.history = history
 
     def run_task(self, task: Task) -> Task:
-        text = task_input_text(task, self.context_messages())
+        text = task_input_text(task, self)
         tool_name, params = self._resolve_execution(text)
         if tool_name is None:
             set_task_state(

@@ -28,13 +28,14 @@ from agent.core.a2a.protocol import (
 from agent.core.agents.base_agent import (
     AgentRole,
     BaseAgent,
+    SubtaskResult,
     task_input_text,
     task_state_text,
 )
 from agent.core.agents.business_agent import BusinessAgent
 from agent.core.agents.subagent import SHELL_COMMAND_PREFIXES, SubAgent
 from agent.core.history.store import HistoryStore
-from agent.core.llm import LLM
+from agent.core.providers import LLM
 from agent.core.skills.library import SkillLibrary, format_skills_block
 from agent.core.tool_executor import ToolExecutor
 
@@ -53,7 +54,7 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
 _SPLIT_RE = re.compile(r"\s*(?:\&\&|;|\n)\s*")
 
 
-def merge_results(task_text: str, records: List[Dict[str, Any]]) -> str:
+def merge_results(task_text: str, records: List[SubtaskResult]) -> str:
     """把子任务执行记录归并为结构化自然语言回复（FR-005 / SC-006，T019）。"""
     if not records:
         return "未拆解出可执行子任务。"
@@ -63,11 +64,11 @@ def merge_results(task_text: str, records: List[Dict[str, Any]]) -> str:
         "",
     ]
     for rec in records:
-        lines.append(f"  [{rec['state']}] ({rec['kind']}) {rec['text']}")
-        result = (rec.get("result") or "").strip()
+        lines.append(f"  [{rec.state}] ({rec.kind}) {rec.text}")
+        result = (rec.result or "").strip()
         if result:
             lines.append(f"      → {result}")
-    failed = [r for r in records if r["state"] != "TASK_STATE_COMPLETED"]
+    failed = [r for r in records if r.state != "TASK_STATE_COMPLETED"]
     lines.append("")
     lines.append(
         "整体结论: "
@@ -108,7 +109,7 @@ class Orchestrator(BaseAgent):
         self.skill_library = skill_library
         # US3 FR-008：会话/命令历史库，传递给命令 SubAgent 落执行记录。
         self.history = history
-        self.last_records: List[Dict[str, Any]] = []
+        self.last_records: List[SubtaskResult] = []
 
     # ---- worker 工厂 ----
     def _default_worker(self, kind: str, agent_id: str) -> BaseAgent:
@@ -196,7 +197,7 @@ class Orchestrator(BaseAgent):
 
     # ---- 主入口 ----
     def run_task(self, task: Task) -> Task:
-        text = task_input_text(task, self.context_messages())
+        text = task_input_text(task, self)
         subtasks = self.decompose(text)
         if not subtasks:
             set_task_state(task, TaskState.TASK_STATE_FAILED, "任务拆解为空，无法编排。")
@@ -209,11 +210,11 @@ class Orchestrator(BaseAgent):
         self._attach_subtasks(task, records)
         return task
 
-    def _dispatch(self, subtasks: List[Dict[str, str]], parent_id: str) -> List[Dict[str, Any]]:
+    def _dispatch(self, subtasks: List[Dict[str, str]], parent_id: str) -> List[SubtaskResult]:
         """并行派发子任务；单个失败不中断整体（返回记录里 state 呈现失败）。"""
-        results: List[Optional[Dict[str, Any]]] = [None] * len(subtasks)
+        results: List[Optional[SubtaskResult]] = [None] * len(subtasks)
 
-        def run_one(index: int) -> Dict[str, Any]:
+        def run_one(index: int) -> SubtaskResult:
             sub = subtasks[index]
             worker = self.worker_factory(sub["kind"], f"{parent_id}-sub-{index}")
             client = InProcessA2AClient(worker)
@@ -221,34 +222,34 @@ class Orchestrator(BaseAgent):
                 sub_task = client.send_task(
                     sub["text"], task_id=f"{parent_id}-sub-{index}"
                 )
-                return {
-                    "index": index,
-                    "kind": sub["kind"],
-                    "text": sub["text"],
-                    "worker": worker.name,
-                    "state": TaskState.Name(sub_task.status.state),
-                    "result": task_state_text(sub_task),
-                }
+                return SubtaskResult(
+                    index=index,
+                    kind=sub["kind"],
+                    text=sub["text"],
+                    worker=worker.name,
+                    state=TaskState.Name(sub_task.status.state),
+                    result=task_state_text(sub_task),
+                )
             except A2AClientError as exc:
                 logger.warning("子任务 %s 失败: %s", sub["text"], exc)
-                return {
-                    "index": index,
-                    "kind": sub["kind"],
-                    "text": sub["text"],
-                    "worker": worker.name,
-                    "state": "TASK_STATE_FAILED",
-                    "result": str(exc),
-                }
+                return SubtaskResult(
+                    index=index,
+                    kind=sub["kind"],
+                    text=sub["text"],
+                    worker=worker.name,
+                    state="TASK_STATE_FAILED",
+                    result=str(exc),
+                )
 
         max_workers = max(1, min(self.max_subagents, len(subtasks)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(run_one, i) for i in range(len(subtasks))]
             for fut in as_completed(futures):
                 rec = fut.result()
-                results[rec["index"]] = rec
+                results[rec.index] = rec
         return [r for r in results if r is not None]
 
-    def _attach_subtasks(self, task: Task, records: List[Dict[str, Any]]) -> None:
+    def _attach_subtasks(self, task: Task, records: List[SubtaskResult]) -> None:
         """把子任务明细以 data Part 附加到完成消息（供上层生成事件）。"""
         if not task.status.HasField("message"):
             return
@@ -257,11 +258,11 @@ class Orchestrator(BaseAgent):
                 {
                     "subtasks": [
                         {
-                            "index": r["index"],
-                            "kind": r["kind"],
-                            "text": r["text"],
-                            "worker": r["worker"],
-                            "state": r["state"],
+                            "index": r.index,
+                            "kind": r.kind,
+                            "text": r.text,
+                            "worker": r.worker,
+                            "state": r.state,
                         }
                         for r in records
                     ]

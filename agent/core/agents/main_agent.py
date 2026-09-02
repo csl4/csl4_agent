@@ -23,7 +23,7 @@ from agent.core.agents.base_agent import (
     task_result_text,
 )
 from agent.core.agents.orchestrator import Orchestrator
-from agent.core.llm import LLM
+from agent.core.providers import LLM
 from agent.core.skills.library import SkillLibrary, format_skills_block
 from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.utils.stream import StreamEvents, StreamMessage
@@ -70,7 +70,7 @@ class MainAgent(BaseAgent):
 
     # ---- 无头模式（测试/程序化调用）----
     def run_task(self, task: Task) -> Task:
-        text = task_input_text(task, self.context_messages())
+        text = task_input_text(task, self)
         if not self.multi_agent:
             return self._run_single_fallback(task, text)
         merged = self._orchestrate(text)
@@ -186,11 +186,11 @@ class MainAgent(BaseAgent):
             return []
         return [
             {
-                "index": r["index"],
-                "kind": r["kind"],
-                "text": r["text"],
-                "worker": r["worker"],
-                "state": r["state"],
+                "index": r.index,
+                "kind": r.kind,
+                "text": r.text,
+                "worker": r.worker,
+                "state": r.state,
             }
             for r in orchestrator.last_records
         ]

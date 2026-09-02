@@ -13,7 +13,7 @@ from agent.core.agents.base_agent import (
     BaseAgent,
     task_input_text,
 )
-from agent.core.llm import LLM
+from agent.core.providers import LLM
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class BusinessAgent(BaseAgent):
         self.llm = llm
 
     def run_task(self, task: Task) -> Task:
-        text = task_input_text(task, self.context_messages())
+        text = task_input_text(task, self)
         answer = self._ask_llm(text) if self.llm else ""
         set_task_state(
             task,

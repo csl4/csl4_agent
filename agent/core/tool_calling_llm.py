@@ -33,7 +33,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Generator, List, Optional
 
-from agent.core.llm import LLM, ModelResponse
+from agent.core.providers import LLM, ModelResponse
 from agent.core.models import (
     StructuredToolResult,
     StructuredToolResultStatus,

@@ -1,4 +1,4 @@
-"""智能体的对话消息管理。"""
+"""对话消息构造器：把零散材料拼成 LLM 能吃的 messages dict 列表。"""
 
 
 # ======================= 中文导览 =======================
@@ -13,8 +13,9 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from agent.core.prompt import build_system_prompt, build_user_prompt
-from agent.core.prompt_components import PromptComponent
+from agent.core.prompts.components import PromptComponent
+from agent.core.prompts.system import build_system_prompt
+from agent.core.prompts.user import build_user_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -93,3 +94,9 @@ def build_chat_messages(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
+
+
+__all__ = [
+    "add_or_update_system_prompt",
+    "build_chat_messages",
+]

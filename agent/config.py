@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from agent.core.llm import LLM, LiteLLMProvider
+from agent.core.providers import LLM, LiteLLMProvider
 from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.core.tool_executor import ToolExecutor
 from agent.core.tools import Toolset, ToolsetTag

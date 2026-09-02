@@ -22,6 +22,7 @@ from agent.core.models import (
     StructuredToolResultStatus,
     ToolInvokeContext,
     ToolParameter,
+    shell_result_to_structured,
 )
 from agent.core.tools import (
     Tool,
@@ -31,8 +32,6 @@ from agent.core.tools import (
     Transformer,
 )
 from agent.core.transformers import LineCountTransformer
-from agent.plugins.toolsets.bash.bash_toolset import bash_result_to_structured
-from agent.plugins.toolsets.bash.common.bash import BashResult
 from agent.plugins.toolsets.bash.validation import (
     ValidationStatus,
     get_effective_lists,
@@ -245,13 +244,8 @@ class RunSandboxCommand(Tool):
                 invocation=command_str,
             )
 
-        # 复用 bash 结果格式化（值对象字段对齐，宪法 V 复用）。
-        bash_result = BashResult(
-            stdout=result.stdout,
-            return_code=result.return_code,
-            timed_out=result.timed_out,
-        )
-        return bash_result_to_structured(bash_result, command_str, timeout, params)
+        # 统一结果转换（execute_in_shell 直接返回 ShellResult，经共享转换器格式化）。
+        return shell_result_to_structured(result, command_str, timeout, params)
 
 
 def create_sandbox_toolset(

@@ -6,57 +6,19 @@
 
 from pathlib import Path
 
-import pytest
-
 from agent.core.a2a.protocol import (
-    Role,
     TaskState,
-    make_message,
     make_task,
     set_task_state,
 )
 from agent.core.agents.main_agent import MainAgent
 from agent.core.agents.orchestrator import Orchestrator
 from agent.core.agents.subagent import SubAgent
-from agent.core.history.store import HistoryRecord, HistoryStore
-from agent.core.llm import LLM, ModelResponse
-from agent.core.models import ContextWindowUsage
+from agent.core.history.store import HistoryStore
 from agent.core.skills.env_info import collect_env_info, format_env_info
 from agent.core.skills.library import SkillLibrary
 from agent.core.tool_executor import ToolExecutor
-from agent.core.tools import ToolsetTag
-from agent.plugins.toolsets.bash.bash_toolset import create_bash_toolset
-
-
-class RecordingLLM(LLM):
-    """按调用顺序返回预置回复，并记录每次调用的消息（验证上下文注入）。"""
-
-    def __init__(self, responses: list) -> None:
-        super().__init__(model="fake-model")
-        self.responses = list(responses)
-        self.calls: list = []
-
-    def completion(self, messages, tools=None, tool_choice="auto", temperature=0.7,
-                   stream=False, response_format=None, drop_params=True) -> ModelResponse:
-        self.calls.append(messages)
-        if self.responses:
-            return ModelResponse(content=self.responses.pop(0))
-        return ModelResponse(content="(fallback)")
-
-    def count_tokens(self, messages, tools=None) -> ContextWindowUsage:
-        return ContextWindowUsage(total_tokens=1)
-
-    def get_context_window_size(self) -> int:
-        return 128000
-
-    def get_maximum_output_token(self) -> int:
-        return 4096
-
-
-@pytest.fixture
-def bash_executor() -> ToolExecutor:
-    toolset = create_bash_toolset({"builtin_allowlist": "extended"})
-    return ToolExecutor(toolsets=[toolset], toolset_tag_filter=[ToolsetTag.CLI])
+from tests.helpers import ScriptedLLM
 
 
 def _write_skill(directory: Path) -> Path:
@@ -78,7 +40,7 @@ class TestSkillInjection:
         """匹配的技能指令出现在编排 LLM 的系统提示中（FR-006）。"""
         skill_path = _write_skill(tmp_path / "skills")
         lib = SkillLibrary(directory=skill_path.parent)
-        llm = RecordingLLM([
+        llm = ScriptedLLM([
             '[{"kind":"command","text":"df -h"}, {"kind":"command","text":"du -sh ."}]',
             "磁盘占用分析完成。",
         ])
@@ -90,15 +52,8 @@ class TestSkillInjection:
 
         task = make_task("t-skill")
         set_task_state(task, TaskState.TASK_STATE_SUBMITTED)
-        # 用户任务文本经上下文流入编排层，触发技能自动匹配（FR-006）。
-        main_agent.add_context(
-            make_message(
-                Role.ROLE_USER,
-                "请帮我分析磁盘占用情况",
-                task_id=task.id,
-                context_id=task.context_id,
-            )
-        )
+        # 用户任务文本经 task_inputs 注册表流入编排层，触发技能自动匹配（FR-006）。
+        main_agent.record_task_input(task.id, "请帮我分析磁盘占用情况")
         result = main_agent.run_task(task)
 
         assert result.status.state == TaskState.TASK_STATE_COMPLETED
@@ -111,7 +66,7 @@ class TestSkillInjection:
         """环境信息（工作目录等）注入 Agent 上下文（FR-007）。"""
         env = collect_env_info(tool_names=["bash"])
         knowledge = format_env_info(env)
-        llm = RecordingLLM([
+        llm = ScriptedLLM([
             '[{"kind":"command","text":"echo hi"}]',
             "完成。",
         ])
@@ -123,14 +78,7 @@ class TestSkillInjection:
 
         task = make_task("t-env")
         set_task_state(task, TaskState.TASK_STATE_SUBMITTED)
-        main_agent.add_context(
-            make_message(
-                Role.ROLE_USER,
-                "请列出当前目录内容",
-                task_id=task.id,
-                context_id=task.context_id,
-            )
-        )
+        main_agent.record_task_input(task.id, "请列出当前目录内容")
         result = main_agent.run_task(task)
 
         assert result.status.state == TaskState.TASK_STATE_COMPLETED

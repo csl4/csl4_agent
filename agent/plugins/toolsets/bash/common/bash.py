@@ -10,7 +10,7 @@
 # Bash 的【底层执行封装】：真正把命令字符串跑起来的最后一段管道的核心。
 # 数据流位置：RunBashCommand._invoke() → execute_bash_command()（本文件）。
 #   传入：cmd 命令字符串 + timeout 超时秒数 + bash_path 可执行文件路径。
-#   产出：BashResult（一个小值对象盒子：stdout / return_code / timed_out）。
+#   产出：ShellResult（统一命令结果类型，core.models.result；stdout / return_code / timed_out）。
 # 关键封装点：
 #   ① find_bash_executable()——解析用哪个 bash：显式配置 > 环境变量 > PATH(排除
 #      System32 的 WSL 启动器) > 已知 Git Bash 安装路径。
@@ -27,9 +27,10 @@ import shutil
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
+
+from agent.core.models.result import ShellResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,19 +48,6 @@ BASH_ENV_VAR = "AGENT_BASH_PATH"
 # Grace period (seconds) to let a timed-out child exit on SIGTERM - and run
 # any cleanup it does on termination - before it is force-killed with SIGKILL.
 ARGV_TERMINATE_GRACE_SECONDS = 5
-
-
-@dataclass
-class BashResult:
-    """Bash 命令执行的简单结果类型。"""
-
-    # ---- 值对象（盒子）：bash 一次执行的结果快照。----
-    # stdout 拿到什么输出 -> 谁消费：RunBashCommand 的 bash_result_to_structured()
-    #   把它内容拼进 StructuredToolResult.data。
-    # return_code：None 表示超时被强杀（无正常退出码）；timed_out=True 与之对应。
-    stdout: str
-    return_code: Optional[int]
-    timed_out: bool
 
 
 def find_bash_executable(configured_path: str = "") -> str:
@@ -148,10 +136,10 @@ def _popen(bash_path: str, cmd: str, cwd: str = "") -> subprocess.Popen:
 
 def execute_bash_command(
     cmd: str, timeout: int, bash_path: str = "", cwd: str = ""
-) -> BashResult:
+) -> ShellResult:
     # 对外唯一入口：解析 bash 路径 → 起子进程 → communicate 等结果/捕获超时。
-    # 正常：返回 BashResult(return_code=退出码, timed_out=False)；
-    # 超时：_kill_process_tree 杀整树后收尾，返回 BashResult(return_code=None, timed_out=True)。
+    # 正常：返回 ShellResult(return_code=退出码, timed_out=False)；
+    # 超时：_kill_process_tree 杀整树后收尾，返回 ShellResult(return_code=None, timed_out=True)。
     """
     执行一条 bash 命令并返回结果。
 
@@ -162,7 +150,7 @@ def execute_bash_command(
         cwd: 可选的受控工作目录（为空时继承当前目录）
 
     返回:
-        携带 stdout、return_code 和 timed_out 标志的 BashResult
+        携带 stdout、return_code 和 timed_out 标志的 ShellResult
     """
     resolved_bash = find_bash_executable(bash_path)
     logger.debug(f"Executing bash command via {resolved_bash}: {cmd}")
@@ -172,7 +160,7 @@ def execute_bash_command(
         stdout, _ = process.communicate(timeout=timeout)
         stdout = stdout.strip() if stdout else ""
 
-        return BashResult(
+        return ShellResult(
             stdout=stdout,
             return_code=process.returncode,
             timed_out=False,
@@ -183,7 +171,7 @@ def execute_bash_command(
         stdout, _ = process.communicate()
         stdout = stdout.strip() if stdout else ""
 
-        return BashResult(
+        return ShellResult(
             stdout=stdout,
             return_code=None,
             timed_out=True,

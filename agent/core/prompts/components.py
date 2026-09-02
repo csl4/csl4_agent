@@ -6,7 +6,7 @@
 #   PromptComponent      → 8 个组件的枚举（每个独立可开关/覆盖）
 #   PROMPT_COMPONENT_ORDER → 拼装顺序（越靠前的组件在 prompt 里越靠上）
 #   DEFAULT_PROMPT_COMPONENTS → 各组件默认文本（开箱即用，可被 custom_components 覆盖）
-# 与 prompt.py 配合：这里定义「有哪些零件+顺序+默认值」，prompt.py 负责按顺序组装。
+# 与同包 system.py 配合：这里定义「有哪些零件+顺序+默认值」，system.py 负责按顺序组装。
 # =========================================================
 
 from enum import Enum
@@ -90,3 +90,9 @@ DEFAULT_PROMPT_COMPONENTS: Dict[PromptComponent, str] = {
         "- If you made a mistake, admit it and correct yourself."
     ),
 }
+
+__all__ = [
+    "DEFAULT_PROMPT_COMPONENTS",
+    "PROMPT_COMPONENT_ORDER",
+    "PromptComponent",
+]

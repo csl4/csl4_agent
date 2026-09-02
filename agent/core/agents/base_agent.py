@@ -2,28 +2,27 @@
 
 设计（宪法 V：字段/方法放最通用层级）：
 - `AgentRole` 枚举固定四个角色：main / orchestrator / business / subagent。
-- `BaseAgent` 是所有角色的基类：持有角色、实例 ID、上下文（A2A Message 列表）、
-  父级引用（SubAgent 必填）。
-- 协作以 A2A `Task` / `Message` 交换（见 agent/core/a2a/protocol.py）。
+- `BaseAgent` 是所有角色的基类：持有角色、实例 ID、上下文（OpenAI 风格消息
+  字典 `[{"role": ..., "content": ...}]`，可直接喂 LLM）、父级引用（SubAgent 必填）。
+- 协作以 A2A `Task` 交换（见 agent/core/a2a/protocol.py）；Task 输入文本另存
+  `task_inputs` 注册表（task_id → 原始文本），保持消息字典纯净（不带 task 元数据）。
 - 重试统一走 tenacity（宪法 V：不手写重试循环）。
 """
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from agent.core.a2a.protocol import (
     FAILED_STATES,
-    Message,
-    Role,
     Task,
     TaskState,
     is_failed,
     is_terminal,
-    make_message,
     make_task,
     set_task_state,
 )
@@ -38,6 +37,33 @@ class AgentRole(str, Enum):
     ORCHESTRATOR = "orchestrator"
     BUSINESS = "business"
     SUBAGENT = "subagent"
+
+
+@dataclass
+class SubtaskResult:
+    """一次子任务执行的类型化记录（业务层对象化，替代裸 dict）。
+
+    由 Orchestrator._dispatch 生成，供 last_records / merge_results /
+    _attach_subtasks / MainAgent._subtask_events 统一以字段访问。
+    """
+
+    index: int
+    kind: str
+    text: str
+    worker: str
+    state: str
+    result: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转为 dict（供 data Part / 流事件序列化）。"""
+        return {
+            "index": self.index,
+            "kind": self.kind,
+            "text": self.text,
+            "worker": self.worker,
+            "state": self.state,
+            "result": self.result,
+        }
 
 
 # 默认重试策略：最多 3 次，指数退避（宪法 V：重试走 tenacity）
@@ -66,16 +92,24 @@ class BaseAgent(ABC):
         self.role = role
         self.name = name or f"{role.value}-{agent_id}"
         self.parent = parent
-        self.context: List[Message] = []
+        # 内部消息列表：OpenAI 风格结构化消息字典 `{"role": ..., "content": ...}`，
+        # 可直接喂 LLM（无需在消息里混入 task 元数据）。
+        self.context: List[Dict[str, Any]] = []
+        # task_id → 原始任务文本（task_input_text 优先读取，见下）。
+        self.task_inputs: Dict[str, str] = {}
         # US3 FR-007：环境/知识上下文，注入该角色的 LLM 提示词（无 LLM 的角色忽略）。
         self.knowledge_text = knowledge_text
 
     # ---- 上下文管理 ----
-    def add_context(self, message: Message) -> None:
-        """把一条 A2A Message 追加到本 Agent 的上下文窗口。"""
+    def add_context(self, message: Dict[str, Any]) -> None:
+        """把一条 OpenAI 风格消息字典追加到本 Agent 的上下文窗口。"""
         self.context.append(message)
 
-    def context_messages(self) -> List[Message]:
+    def record_task_input(self, task_id: str, text: str) -> None:
+        """记录一次 Task 的原始输入文本（供 task_input_text 读取）。"""
+        self.task_inputs[task_id] = text
+
+    def context_messages(self) -> List[Dict[str, Any]]:
         """当前上下文消息快照。"""
         return list(self.context)
 
@@ -83,22 +117,21 @@ class BaseAgent(ABC):
         """上下文文本视图（供 LLM 提示词使用）。"""
         lines = []
         for msg in self.context:
-            for part in msg.parts:
-                if part.HasField("text"):
-                    lines.append(f"[{msg.role}] {part.text}")
+            text = _message_text(msg.get("content") if isinstance(msg, dict) else "")
+            if text:
+                lines.append(f"[{msg.get('role', '?')}] {text}")
         return "\n".join(lines)
 
     # ---- 协作：发送 ----
     @RETRY_DECORATOR
     def send(self, to: "BaseAgent", text: str, task: Optional[Task] = None) -> Task:
-        """发送一条 A2A Message 给目标 Agent，返回携带的 Task。
+        """发送一条消息给目标 Agent，返回携带的 Task。
 
         若未显式传 task，则新建一个 SUBMITTED Task 作为本次协作的工作单元。
+        消息以 OpenAI 风格字典 `{"role": "assistant", "content": text}` 写入双方上下文。
         """
         out_task = task or make_task(f"{self.agent_id}->{to.agent_id}")
-        msg = make_message(
-            Role.ROLE_AGENT, text, task_id=out_task.id, context_id=out_task.context_id
-        )
+        msg: Dict[str, Any] = {"role": "assistant", "content": text}
         self.add_context(msg)
         to.add_context(msg)
         logger.debug(
@@ -159,19 +192,30 @@ def task_result_text(task: Task) -> str:
     return "\n".join(parts)
 
 
-def task_input_text(task: Task, messages: Optional[List[Message]] = None) -> str:
+def _message_text(content: Any) -> str:
+    """从 OpenAI 风格消息 content 提取纯文本（兼容 str 与多模态 list）。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(c.get("text", ""))
+            for c in content
+            if isinstance(c, dict) and c.get("text")
+        ).strip()
+    return ""
+
+
+def task_input_text(task: Task, agent: Optional[BaseAgent] = None) -> str:
     """提取 Task 的【输入】任务文本。
 
-    优先取上下文里与 task 同 id 的最近 ROLE_USER 消息（客户端写入），
+    优先取 agent.task_inputs 里与 task 同 id 的原始输入（客户端写入时记录），
     其次回退到 task.status.message 的文本 —— 保证重试/多轮时取到的始终是
     原始输入，而非上一次运行的输出。
     """
-    if messages:
-        for msg in reversed(messages):
-            if msg.task_id == task.id and msg.role == Role.ROLE_USER:
-                parts = [p.text for p in msg.parts if p.HasField("text")]
-                if parts:
-                    return "\n".join(parts)
+    if agent is not None:
+        text = agent.task_inputs.get(task.id)
+        if text:
+            return text
     if task.status.HasField("message"):
         parts = [p.text for p in task.status.message.parts if p.HasField("text")]
         if parts:
@@ -202,6 +246,7 @@ __all__ = [
     "AgentRole",
     "BaseAgent",
     "FAILED_STATES",
+    "SubtaskResult",
     "run_task_safe",
     "task_input_text",
     "task_result_text",

@@ -40,7 +40,7 @@ flowchart TD
         Stream["StreamMessage / StreamEvents<br/>事件协议"]
     end
 
-    subgraph Plugins["工具插件模块 · core/tools.py + plugins/"]
+    subgraph Plugins["工具插件模块 · core/tools/ + plugins/"]
         direction TB
         Tool["Tool (ABC) 模板方法 invoke()<br/>审批 → 强转 → _invoke → transformers"]
         Toolset["Toolset<br/>config · 前置 · 审批 · 标签"]
@@ -48,7 +48,7 @@ flowchart TD
         BTS["内置工具集<br/>filesystem · bash · yaml"]
     end
 
-    subgraph Models["值对象 · core/models.py + llm.py"]
+    subgraph Models["值对象 · core/models/ + providers/"]
         direction TB
         TIC["ToolInvokeContext<br/>user_approved 污点追踪"]
         STR["StructuredToolResult<br/>status + data + error"]
@@ -94,11 +94,11 @@ flowchart TD
 | CLI 复用选项 | `agent/common/cli_commons.py` | `opt_api_key` / `opt_model` / `opt_config_file` 等 |
 | 装配根 | `agent/config.py` | `Config.create_llm()` / `create_tool_executor()` / `create_tool_calling_llm()` |
 | 主循环 | `agent/core/tool_calling_llm.py` | `ToolCallingLLM.call_stream()` |
-| LLM 抽象 | `agent/core/llm.py` | `LLM`(ABC)、`LiteLLMProvider`、`ModelResponse` |
+| 供应商抽象 | `agent/core/providers/` | `LLM`(ABC)、`LiteLLMProvider`、`ModelResponse` |
 | 工具分发 | `agent/core/tool_executor.py` | `ToolExecutor` |
-| 工具基座 | `agent/core/tools.py` | `Tool`(ABC)、`Toolset`、`Transformer`、`Prerequisite` |
-| 值对象 | `agent/core/models.py` | `ToolInvokeContext`、`StructuredToolResult`、`ToolCallResult` |
-| 消息构造 | `agent/core/conversations.py` | `build_chat_messages()` |
+| 工具基座 | `agent/core/tools/` | `Tool`(ABC)、`Toolset`、`Transformer`、`Prerequisite` |
+| 值对象 | `agent/core/models/` | `ToolInvokeContext`、`StructuredToolResult`、`ToolCallResult`、`ShellResult` |
+| 提示词装配 | `agent/core/prompts/` | `build_chat_messages()`、`build_system_prompt()`、`build_user_prompt()` |
 | 压缩管控 | `agent/core/truncation/` | `SessionCompactor`、`ContextWindowLimiter` |
 | 结果瘦身 | `agent/core/transformers/builtin.py` | `JsonTruncationTransformer`、`LineCountTransformer` |
 | 事件协议 | `agent/utils/stream.py` | `StreamEvents`、`StreamMessage` |

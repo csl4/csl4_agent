@@ -1,6 +1,5 @@
 """核心 Agent 框架。"""
 
-from agent.core.llm import LLM, LiteLLMProvider, ModelResponse
 from agent.core.models import (
     ApprovalRequirement,
     ContextWindowUsage,
@@ -10,7 +9,8 @@ from agent.core.models import (
     ToolInvokeContext,
     ToolParameter,
 )
-from agent.core.prompt_components import PromptComponent
+from agent.core.providers import LLM, LiteLLMProvider, ModelResponse
+from agent.core.prompts import PromptComponent
 from agent.core.tool_calling_llm import ToolCallingLLM
 from agent.core.tool_executor import ToolExecutor
 from agent.core.tools import (
@@ -40,12 +40,13 @@ from agent.core.agents import (
 )
 # 环境适配：跨终端探测/改写/执行（US2 FR-002）。
 from agent.core.env.terminal import (
-    ShellResult,
     TerminalType,
     adapt_command,
     detect_shell,
     execute_in_shell,
 )
+# 命令执行统一结果类型（输出接口统一，原 terminal.ShellResult 迁入 models.result）。
+from agent.core.models.result import ShellResult
 
 __all__ = [
     "A2AClient",

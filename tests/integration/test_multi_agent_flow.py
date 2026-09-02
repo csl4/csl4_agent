@@ -12,51 +12,11 @@ mock，而用依赖注入桩，符合宪法「HTTP mock 用 responses，不用
 绕开审批交互（审批交互属 US2 范围）。
 """
 
-import pytest
-
 from agent.core.a2a.protocol import TaskState, make_task, set_task_state
 from agent.core.agents.main_agent import MainAgent
 from agent.core.agents.orchestrator import Orchestrator
-from agent.core.llm import LLM, ModelResponse
-from agent.core.models import ContextWindowUsage
 from agent.core.tool_executor import ToolExecutor
-from agent.core.tools import ToolsetTag
-from agent.plugins.toolsets.bash.bash_toolset import create_bash_toolset
-
-
-class ScriptedLLM(LLM):
-    """按调用顺序返回预置回复的假 LLM（离线确定性测试）。"""
-
-    def __init__(self, responses: list) -> None:
-        super().__init__(model="fake-model")
-        self.responses = list(responses)
-        self.calls: list = []
-
-    def completion(self, messages, tools=None, tool_choice="auto", temperature=0.7,
-                   stream=False, response_format=None, drop_params=True) -> ModelResponse:
-        self.calls.append(messages)
-        if self.responses:
-            return ModelResponse(content=self.responses.pop(0))
-        return ModelResponse(content="(fallback)")
-
-    def count_tokens(self, messages, tools=None) -> ContextWindowUsage:
-        return ContextWindowUsage(total_tokens=1)
-
-    def get_context_window_size(self) -> int:
-        return 128000
-
-    def get_maximum_output_token(self) -> int:
-        return 4096
-
-
-@pytest.fixture
-def bash_executor() -> ToolExecutor:
-    """带 extended 白名单的真实 bash toolset（df/du 免审批直跑）。"""
-    toolset = create_bash_toolset({"builtin_allowlist": "extended"})
-    return ToolExecutor(
-        toolsets=[toolset],
-        toolset_tag_filter=[ToolsetTag.CLI],
-    )
+from tests.helpers import ScriptedLLM
 
 
 def test_mixed_command_task_coordinates_roles(bash_executor: ToolExecutor) -> None:
@@ -82,8 +42,8 @@ def test_mixed_command_task_coordinates_roles(bash_executor: ToolExecutor) -> No
     # 两个命令子任务都真实执行成功（bash toolset 输出随命令文本回显）
     records = orchestrator.last_records
     assert len(records) == 2
-    assert all(r["state"] == "TASK_STATE_COMPLETED" for r in records)
-    joined = "\n".join(r["result"] for r in records)
+    assert all(r.state == "TASK_STATE_COMPLETED" for r in records)
+    joined = "\n".join(r.result for r in records)
     assert "df -h" in joined
     assert "du -sh ." in joined
 
@@ -105,8 +65,8 @@ def test_single_command_via_subagent(bash_executor: ToolExecutor) -> None:
 
     assert result.status.state == TaskState.TASK_STATE_COMPLETED
     records = orchestrator.last_records
-    assert records and records[0]["state"] == "TASK_STATE_COMPLETED"
-    assert "multi-agent-ok" in records[0]["result"]
+    assert records and records[0].state == "TASK_STATE_COMPLETED"
+    assert "multi-agent-ok" in records[0].result
 
 
 def test_business_subtask_without_tool(bash_executor: ToolExecutor) -> None:
@@ -131,6 +91,6 @@ def test_business_subtask_without_tool(bash_executor: ToolExecutor) -> None:
     assert result.status.state == TaskState.TASK_STATE_COMPLETED
     records = orchestrator.last_records
     assert len(records) == 1
-    assert records[0]["kind"] == "business"
-    assert records[0]["state"] == "TASK_STATE_COMPLETED"
-    assert "本周磁盘增长约 5%" in records[0]["result"]
+    assert records[0].kind == "business"
+    assert records[0].state == "TASK_STATE_COMPLETED"
+    assert "本周磁盘增长约 5%" in records[0].result

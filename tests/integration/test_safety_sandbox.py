@@ -14,34 +14,11 @@ import pytest
 
 from agent.core.a2a.protocol import TaskState, make_task, set_task_state
 from agent.core.agents.orchestrator import Orchestrator
-from agent.core.llm import LLM, ModelResponse
-from agent.core.models import ContextWindowUsage, StructuredToolResultStatus, ToolInvokeContext
+from agent.core.models import StructuredToolResultStatus, ToolInvokeContext
 from agent.core.tool_executor import ToolExecutor
 from agent.core.tools import ToolsetTag
 from agent.plugins.toolsets.sandbox.sandbox_toolset import create_sandbox_toolset
-
-
-class _ScriptedLLM(LLM):
-    """按调用顺序返回预置回复的假 LLM（离线确定性测试）。"""
-
-    def __init__(self, responses: list) -> None:
-        super().__init__(model="fake-model")
-        self.responses = list(responses)
-
-    def completion(self, messages, tools=None, tool_choice="auto", temperature=0.7,
-                   stream=False, response_format=None, drop_params=True) -> ModelResponse:
-        if self.responses:
-            return ModelResponse(content=self.responses.pop(0))
-        return ModelResponse(content="(fallback)")
-
-    def count_tokens(self, messages, tools=None) -> ContextWindowUsage:
-        return ContextWindowUsage(total_tokens=1)
-
-    def get_context_window_size(self) -> int:
-        return 128000
-
-    def get_maximum_output_token(self) -> int:
-        return 4096
+from tests.helpers import ScriptedLLM
 
 
 @pytest.fixture
@@ -154,7 +131,7 @@ def test_sandbox_working_dir(sandbox_executor: ToolExecutor, tmp_path) -> None:
 
 def test_subagent_command_runs_via_sandbox(sandbox_executor: ToolExecutor) -> None:
     """T024/T026 接线：命令子任务经 SubAgent 走沙箱执行（带审批层）。"""
-    llm = _ScriptedLLM([
+    llm = ScriptedLLM([
         '[{"kind":"command","text":"echo multi-agent-sandbox-ok"}]',
         "执行完成。",
     ])
@@ -167,5 +144,5 @@ def test_subagent_command_runs_via_sandbox(sandbox_executor: ToolExecutor) -> No
 
     assert result.status.state == TaskState.TASK_STATE_COMPLETED
     records = orchestrator.last_records
-    assert records and records[0]["state"] == "TASK_STATE_COMPLETED"
-    assert "multi-agent-sandbox-ok" in records[0]["result"]
+    assert records and records[0].state == "TASK_STATE_COMPLETED"
+    assert "multi-agent-sandbox-ok" in records[0].result

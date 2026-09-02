@@ -3,7 +3,7 @@
 import pytest
 
 from agent.core.a2a.client import A2AClientError, InProcessA2AClient
-from agent.core.a2a.protocol import Role, Task, TaskState, set_task_state
+from agent.core.a2a.protocol import Task, TaskState, set_task_state
 from agent.core.agents.base_agent import AgentRole, BaseAgent, task_input_text
 
 
@@ -20,7 +20,7 @@ class EchoAgent(BaseAgent):
         if self.calls <= self.fail_first:
             set_task_state(task, TaskState.TASK_STATE_FAILED, "transient-failure")
             return task
-        text = task_input_text(task, self.context_messages())
+        text = task_input_text(task, self)
         set_task_state(task, TaskState.TASK_STATE_COMPLETED, f"echo:{text}")
         return task
 
@@ -43,9 +43,12 @@ class TestInProcessClientSend:
         target = EchoAgent()
         client = InProcessA2AClient(target)
         client.send_task("ping")
-        user_msgs = [m for m in target.context if m.role == Role.ROLE_USER]
+        # Agent 内部上下文为 OpenAI 风格消息字典（user 消息 + 输入注册表）。
+        user_msgs = [m for m in target.context if m.get("role") == "user"]
         assert len(user_msgs) == 1
-        assert user_msgs[0].parts[0].text == "ping"
+        assert user_msgs[0]["content"] == "ping"
+        # 原始输入另存 task_inputs 注册表（task 元数据不进消息字典）。
+        assert list(target.task_inputs.values()) == ["ping"]
 
     def test_retries_transient_failure(self) -> None:
         """第一次失败 → tenacity 自动重试并成功（宪法 V：重试走 tenacity）。"""

@@ -37,7 +37,7 @@ from agent.common.cli_commons import (
 )
 from agent.config import Config
 from agent.core.agents import MainAgent, Orchestrator
-from agent.core.conversations import build_chat_messages
+from agent.core.prompts import build_chat_messages
 from agent.core.history.store import HistoryStore
 from agent.core.skills.env_info import collect_env_info, format_env_info
 from agent.core.skills.library import Skill, SkillLibrary
