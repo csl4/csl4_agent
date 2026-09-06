@@ -8,7 +8,7 @@
 
 ## 前置条件
 
-- 已安装依赖（`poetry install`），当前分支 `001-multi-agent-cli`。
+- 已安装依赖（`uv pip install -e ".[dev]"`），当前分支 `001-multi-agent-cli`。
 - LLM 配置就绪（`~/.agent/config.yaml` 或环境变量 `AGENT_MODEL`/`AGENT_API_KEY`）。
 - 目标终端：Windows PowerShell / bash（Git Bash）/ zsh 任一可用。
 
@@ -64,13 +64,13 @@ agent chat --multi-agent
 
 ```bash
 # 单元 + 集成测试（无 LLM 调用）
-poetry run pytest tests/unit tests/integration -m "not llm" --no-cov
+python -m pytest tests/unit tests/integration -m "not llm"
 
-# 契约/HTTP mock（responses）
-poetry run pytest -k "a2a or contract" --no-cov
+# 契约 / A2A（离线，ScriptedLLM 打桩）
+python -m pytest -k "a2a or contract"
 
-# LLM 相关（需 API 密钥，单独跑）
-poetry run pytest tests/llm/ -n 6 --no-cov
+# LLM 相关（需 API 密钥，单独跑；-n 6 并行需 pytest-xdist）
+python -m pytest tests/llm/ -n 6
 ```
 
 **预期**: 单元/集成测试全绿；`llm` 标记测试不阻塞本地离线验证。

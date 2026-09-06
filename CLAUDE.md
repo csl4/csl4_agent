@@ -9,22 +9,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ```bash
-# 安装依赖
-poetry install
-poetry install --with dev
+# 安装依赖（uv pip 装进当前激活环境，即 conda base_llm）
+uv pip install -e ".[dev]"
 
 # 运行测试
-poetry run pytest tests -m "not llm"          # 非 LLM 测试
-poetry run pytest tests/llm/ -n 6 --no-cov    # LLM 测试（并行）
-poetry run pytest -k "test_name" --no-cov     # 运行单个测试
+python -m pytest tests -m "not llm"          # 非 LLM 测试
+python -m pytest tests/llm/ -n 6             # LLM 测试（并行，需 pytest-xdist）
+python -m pytest -k "test_name"              # 运行单个测试
 
 # 代码质量（仅在用户明确要求时运行）
-poetry run ruff format
-poetry run ruff check --fix
-poetry run mypy
+ruff format
+ruff check --fix
+mypy
 ```
 
-**Poetry 版本注意**：锁定依赖时使用 Poetry 1.8.x（`poetry lock --no-update`），避免 Poetry 2.x 重写整个 lockfile。本机无 poetry 时可退化为 `python -m pytest`（去掉 `--no-cov`）。
+**uv 说明**：依赖管理用 uv 的 pip 兼容接口（`uv pip`），目标是**当前激活的环境**（本机为 conda `base_llm`），不建 `.venv`、无 `uv.lock`。本机 base_llm 的 site-packages 对普通用户只读，首次安装前需在管理员 PowerShell 授权一次：`icacls "D:\anaconda\envs\base_llm\Lib\site-packages" /grant "%USERNAME%:(OI)(CI)M"`。依赖声明在 `pyproject.toml`（PEP 621 `[project]` + `[project.optional-dependencies]`），不要用 Poetry 格式。
 
 ## Architecture Overview
 
@@ -75,8 +74,8 @@ poetry run mypy
 
 **测试规范**：
 - 新功能需要单元测试，新插件需要集成测试
-- HTTP mock 用 `responses` 库，不要用 `@patch("requests.get")`
-- LLM 相关测试打 `llm` marker 单独跑；离线测试用 `tests/helpers.py` 的 `ScriptedLLM` 打桩
+- 离线测试用 `tests/helpers.py` 的 `ScriptedLLM` 打桩（不走 HTTP，无需 `responses`）
+- LLM 相关测试打 `llm` marker 单独跑
 - 测试文件结构与源码一致：`tests/` 镜像 `agent/`
 
 **文件结构**：

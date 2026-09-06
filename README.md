@@ -5,8 +5,7 @@
 ## 安装
 
 ```bash
-poetry install
-poetry install --with dev   # 开发/测试依赖
+uv pip install -e ".[dev]"   # 装进当前激活环境（conda base_llm），含开发/测试依赖
 ```
 
 ## 快速开始
@@ -38,7 +37,7 @@ agent chat --multi-agent   # 多Agent 编排模式
 ## 测试
 
 ```bash
-poetry run pytest tests -m "not llm"   # 离线单测 + 集成测试
+python -m pytest tests -m "not llm"   # 离线单测 + 集成测试
 ```
 
 ## 配置
