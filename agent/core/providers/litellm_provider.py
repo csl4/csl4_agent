@@ -31,6 +31,7 @@ class LiteLLMProvider(LLM):
         drop_params: bool,
     ) -> Dict[str, Any]:
         """构建共用的 litellm.completion kwargs。"""
+        print(f"[debug] LiteLLM 即将发送 model={self.model!r}")  # TODO 调试用，查 model 来源
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,

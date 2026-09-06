@@ -121,6 +121,7 @@ class Config:
         # merge/env/override steps below mutate in place, so a shallow copy
         # would leak one Config instance's values into the next one.
         config = copy.deepcopy(DEFAULT_CONFIG)
+        print(f"[debug] _load 初始(DEFAULT) model={config['llm']['model']!r}")  # TODO 调试用
 
         if self.config_path.exists():
             try:
@@ -128,11 +129,13 @@ class Config:
                     user_config = yaml.safe_load(f) or {}
                 self._deep_merge(config, user_config)
                 logger.info(f"Loaded config from {self.config_path}")
+                print(f"[debug] _load 合并YAML后 model={config['llm']['model']!r}")  # TODO 调试用
             except Exception as e:
                 logger.warning(f"Failed to load config from {self.config_path}: {e}")
 
         # Environment variable overrides（第三层，声明式表见 _ENV_OVERRIDES）
         self._apply_env_overrides(config)
+        print(f"[debug] _load 环境变量后 model={config['llm']['model']!r}")  # TODO 调试用
 
         # 沙箱配置：顶层 `sandbox:`（工具集工厂读取）与 `multi_agent.sandbox`
         # 合并，multi_agent.sandbox 优先（T025，contracts/config.md）。
@@ -189,6 +192,7 @@ class Config:
         if api_key:
             self.data["llm"]["api_key"] = api_key
         if model:
+            print(f"[debug] apply_overrides 收到 --model={model!r}")  # TODO 调试用
             self.data["llm"]["model"] = model
         if base_url:
             self.data["llm"]["base_url"] = base_url
@@ -229,6 +233,10 @@ class Config:
     def create_llm(self) -> LLM:
         """根据配置创建 LLM provider。"""
         llm_config = self.data["llm"]
+        print(
+            f"[debug] config.create_llm model={llm_config['model']!r} "
+            f"| AGENT_MODEL env={os.getenv('AGENT_MODEL')!r}"
+        )  # TODO 调试用，查 model 来源
         return LiteLLMProvider(
             model=llm_config["model"],
             api_key=llm_config["api_key"],

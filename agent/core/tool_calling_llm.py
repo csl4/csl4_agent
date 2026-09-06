@@ -21,10 +21,12 @@
 #   直到某轮 LLM 不再请求工具(tool_calls为空)，它就在那一刻综合历史所有工具输出，
 #   产出最终答案 yield ANSWER_END。
 # 设计理念：
-#   ① 生成器而非 def：可流式渲染、可 cancel_event 打断。
-#   ② 双暂停状态：APPROVAL_REQUIRED(等人审批) / FRONTEND_PAUSE(等前端执行)，
+#   ① 继承 BaseAgent（AgentRole.MAIN）：接入 Agent 继承体系，复用
+#      agent_id/role/name/context/parent 等基类身份；run_task 为 A2A 无头入口。
+#   ② 生成器而非 def：可流式渲染、可 cancel_event 打断。
+#   ③ 双暂停状态：APPROVAL_REQUIRED(等人审批) / FRONTEND_PAUSE(等前端执行)，
 #      即 LangGraph interrupt() 实现的语义；下次调用凭 tool_decisions / frontend_tool_results 恢复。
-#   ③ 底层对象(Tool/ToolInvokeContext)是引擎无关的 —— 同一套能被塞进手写循环或 LangGraph。
+#   ④ 底层对象(Tool/ToolInvokeContext)是引擎无关的 —— 同一套能被塞进手写循环或 LangGraph。
 # =========================================================
 
 import fnmatch
@@ -33,6 +35,9 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Generator, List, Optional
 
+from agent.core.a2a.protocol import Task, TaskState, set_task_state
+from agent.core.agents.base_agent import AgentRole, BaseAgent, task_input_text
+from agent.core.prompts import build_chat_messages
 from agent.core.providers import LLM, ModelResponse
 from agent.core.models import (
     StructuredToolResult,
@@ -48,13 +53,13 @@ from agent.utils.stream import StreamEvents, StreamMessage
 logger = logging.getLogger(__name__)
 
 
-# ---- 行为对象：Agent 主循环 ----
+# ---- 行为对象：Agent 主循环（继承 BaseAgent） ----
 # 输入：构造时注入 ToolExecutor + LLM + 压缩工具；调 call_stream() 送入 messages。
 # 输出：call_stream() 返回生成器，产生 StreamMessage 事件流。
 # 设计要点：持有 LLM + 工具执行 + 压缩(compactor+limiter) 三块，串成主循环；
-#           整个 Agent 的「运行骨架」都在这里。
-class ToolCallingLLM:
-    """编排 LLM 调用与工具执行的核心 Agent 主循环。
+#           整个 Agent 的「运行骨架」都在这里；接入 BaseAgent 继承体系（宪法 V）。
+class ToolCallingLLM(BaseAgent):
+    """编排 LLM 调用与工具执行的核心 Agent 主循环（继承 BaseAgent，AgentRole.MAIN）。
 
     每轮迭代：
     1. 处理审批决策（user_approved=True 的项）
@@ -67,6 +72,9 @@ class ToolCallingLLM:
     特殊状态：
     - APPROVAL_REQUIRED：暂停循环，等待用户决策（以 tool_decisions 恢复）
     - FRONTEND_PAUSE：暂停循环，等待前端执行（以 frontend_tool_results 恢复）
+
+    基类契约：`run_task(task)` 为 A2A 无头入口，消费一轮 call_stream 并完成/失败
+    Task；CLI 交互仍走 call_stream()。
     """
 
     def __init__(
@@ -77,7 +85,18 @@ class ToolCallingLLM:
         enable_compaction: bool = True,
         compaction_threshold_ratio: float = 0.75,
         compaction_keep_last_n: int = 6,
+        agent_id: str = "main",
+        name: str = "",
+        parent: Optional[BaseAgent] = None,
+        knowledge_text: str = "",
     ):
+        super().__init__(
+            agent_id,
+            AgentRole.MAIN,
+            name=name or "main",
+            parent=parent,
+            knowledge_text=knowledge_text,
+        )
         self.tool_executor = tool_executor
         self.llm = llm
         self.max_steps = max_steps
@@ -94,6 +113,30 @@ class ToolCallingLLM:
             llm=llm,
             threshold_ratio=compaction_threshold_ratio,
         )
+
+    def run_task(self, task: Task) -> Task:
+        """无头模式：消费一轮 call_stream 主循环并完成 Task（A2A 协议兼容）。
+
+        单 Agent 主循环的无头入口（CLI 交互走 call_stream()）；起始消息优先取
+        基类 context（send/add_context 写入），否则按任务文本经 build_chat_messages
+        构造（含系统提示与工具集描述）。
+        """
+        text = task_input_text(task, self)
+        messages = self.context_messages()
+        if not messages:
+            messages = build_chat_messages(
+                ask=text,
+                toolsets=self.tool_executor.enabled_toolsets,
+            )
+        content = ""
+        for event in self.call_stream(messages=messages, enable_tool_approval=False):
+            if event.event == StreamEvents.ANSWER_END:
+                content = event.data.get("content", "") or ""
+        if content:
+            set_task_state(task, TaskState.TASK_STATE_COMPLETED, content)
+        else:
+            set_task_state(task, TaskState.TASK_STATE_FAILED, "单 Agent 主循环未产出最终答复。")
+        return task
 
     # 核心公开入口：跑完一轮主循环，返回生成器逐个吐 StreamMessage。
     #   call_stream 是【可暂停恢复】的：遇到审批/前端暂停会 return（不抛异常），

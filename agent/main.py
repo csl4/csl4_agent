@@ -116,6 +116,7 @@ def _create_multi_agent(config: Config) -> MainAgent:
     历史存储（FR-008），一并注入编排/主 Agent。
     """
     settings = config.multi_agent_settings()
+    print(f"[debug] multi_agent.orchestrator_model={settings.get('orchestrator_model')!r}")  # TODO 调试用
     llm = config.create_llm()
     orchestrator_llm = llm
     if settings.get("orchestrator_model"):
