@@ -7,12 +7,18 @@ from pydantic import BaseModel, Field
 
 # ---- 值对象：token 用量统计 ----
 # 输入：LLM provider 填充；输出：供压缩判定/界面显示。
+# 企业级（US2 T020，R-06）：cache_read/cache_write/reasoning 明细随
+# model_call 审计事件记录（contracts/audit.md usage 键名一致），成本按本地
+# 定价表估算。字段带默认值 → 既有构造（total_tokens=1 等）零迁移。
 class ContextWindowUsage(BaseModel):
     """用于上下文窗口管理的 token 用量统计。"""
 
     total_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    reasoning_tokens: int = 0
 
 
 # ---- 值对象：审批请求 ----

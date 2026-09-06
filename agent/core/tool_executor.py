@@ -21,6 +21,11 @@ from agent.core.models import (
     StructuredToolResultStatus,
     ToolCallResult,
 )
+from agent.core.policy.audit import AuditLog
+from agent.core.policy.command_guard import CommandGuard
+from agent.core.policy.hitl import HitlPolicy
+from agent.core.policy.path_guard import PathGuard
+from agent.core.policy.rules import guard_kind_for
 from agent.core.tools import Tool, Toolset, ToolsetStatusEnum, ToolsetTag, ToolsetType
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,11 @@ class ToolExecutor:
         self,
         toolsets: Optional[List[Toolset]] = None,
         toolset_tag_filter: Optional[List[ToolsetTag]] = None,
+        *,
+        path_guard: Optional[PathGuard] = None,
+        command_guard: Optional[CommandGuard] = None,
+        hitl_policy: Optional[HitlPolicy] = None,
+        audit_log: Optional[AuditLog] = None,
     ):
         """初始化 ToolExecutor。
 
@@ -53,6 +63,11 @@ class ToolExecutor:
                 None 表示不过滤（加载所有已启用的工具集）。
                 示例：CLI 模式用 [ToolsetTag.CORE, ToolsetTag.CLI]，
                 server 模式用 [ToolsetTag.CORE, ToolsetTag.CLUSTER]。
+            path_guard / command_guard: 企业级守卫（002-enterprise-cli-upgrade US1，
+                T013）。审批前、永不豁免；缺省 None = 不启用（向后兼容）。
+            hitl_policy: HITL 策略。None 时只做纵深防御（never 强制放行），
+                审批决策仍由主循环处理。
+            audit_log: 可选审计日志。守卫拦截写 `blocked` 事件（T016）。
         """
         self.toolsets: List[Toolset] = toolsets or []
         self.toolset_tag_filter: Optional[List[ToolsetTag]] = toolset_tag_filter
@@ -60,6 +75,11 @@ class ToolExecutor:
         self.tools_by_name: Dict[str, Tool] = {} # key是工具名，value 对应的工具对象
         self._tool_to_toolset: Dict[str, Toolset] = {}
         self._initialized_toolsets: set = set()
+        # 企业级安全策略（R-01）：守卫/审批/审计注入点
+        self.path_guard = path_guard
+        self.command_guard = command_guard
+        self.hitl_policy = hitl_policy
+        self.audit_log = audit_log
         self._build_index()
 
     def _build_index(self) -> None:
@@ -182,6 +202,9 @@ class ToolExecutor:
 
         tool = self.get_tool_by_name(tool_name)
         if tool is None:
+            self._audit_tool_call(
+                tool_name, params, StructuredToolResultStatus.ERROR, context
+            )
             return ToolCallResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -191,14 +214,137 @@ class ToolExecutor:
                 ),
             )
 
+        # ① 企业级守卫（US1 T013/T016，FR-001/002）：审批前、永不豁免。
+        #    拦截返回 ERROR + 写 `blocked` 审计事件（0 静默，FR-005）。
+        blocked = self._guard_block(tool_name, params)
+        if blocked is not None:
+            reason, detail = blocked
+            self._audit_blocked(tool_name, params, reason, detail, context)
+            return ToolCallResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                result=StructuredToolResult(
+                    status=StructuredToolResultStatus.ERROR,
+                    error=detail,
+                    params=params,
+                    invocation=params.get("command") or params.get("path"),
+                ),
+                execution_time_ms=(time.time() - start) * 1000,
+            )
+
+        # ② HITL=never 纵深防御（US1 T014）：直连 execute_tool 的调用方
+        #    （serve/subagent）配置 never 模式时强制 user_approved=True
+        #    （免审批直跑，守卫仍拦截）。审批决策本身在主循环统一处理。
+        if (
+            self.hitl_policy is not None
+            and self.hitl_policy.never
+            and not context.user_approved
+        ):
+            context = context.model_copy(update={"user_approved": True})
+
         result = tool.invoke(params, context)
         elapsed = (time.time() - start) * 1000
+
+        # 企业级：真实工具执行留痕（US2 T019，FR-005/007，contracts/audit.md）。
+        # 审批/前端暂停不算执行（主循环另有 approval 事件），守卫拦截在上方
+        # _audit_blocked 已记 outcome=blocked，此处不重复。
+        self._audit_tool_call(tool_name, params, result.status, context)
 
         return ToolCallResult(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             result=result,
             execution_time_ms=elapsed,
+        )
+
+    # ---- 企业级守卫拦截点（US1 T013/T016）----
+    def _guard_block(
+        self, tool_name: str, params: Dict[str, Any]
+    ) -> Optional[tuple]:
+        """运行守卫，命中返回 (reason, detail)；未命中返回 None。
+
+        reason 是审计事件用的稳定标识：``path_guard`` / ``command_guard``
+        （contracts/audit.md）。参数缺失/非字符串不触发（工具自身校验）。
+        """
+        kind = guard_kind_for(tool_name)
+        if kind == "path" and self.path_guard is not None:
+            path = params.get("path", "")
+            if isinstance(path, str) and path.strip():
+                ok, reason = self.path_guard.check(path)
+                if not ok:
+                    return ("path_guard", f"Path blocked by PathGuard: {reason}")
+        elif kind == "command" and self.command_guard is not None:
+            command = params.get("command", "")
+            if isinstance(command, str) and command.strip():
+                ok, reason = self.command_guard.check(command)
+                if not ok:
+                    return (
+                        "command_guard",
+                        f"Command blocked by CommandGuard: {reason}",
+                    )
+        return None
+
+    def _audit_blocked(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        reason: str,
+        detail: str,
+        context: Any = None,
+    ) -> None:
+        """守卫拦截即记 `blocked` 审计事件（T016，0 静默放行）。"""
+        if self.audit_log is None:
+            return
+        self.audit_log.record(
+            event_type="tool_call",
+            payload={
+                "tool": tool_name,
+                "params": params,
+                "reason": reason,
+                "detail": detail,
+            },
+            outcome="blocked",
+            session_id=self._context_session_id(context),
+        )
+
+    @staticmethod
+    def _context_session_id(context: Any) -> str:
+        """从 ToolInvokeContext.request_context 提取 session_id（缺省空串）。"""
+        rc = getattr(context, "request_context", None)
+        if rc:
+            return str(rc.get("session_id", "") or "")
+        return ""
+
+    def _audit_tool_call(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        status: StructuredToolResultStatus,
+        context: Any,
+    ) -> None:
+        """真实工具执行（非暂停、非守卫拦截）一条 tool_call 审计（T019）。"""
+        if self.audit_log is None:
+            return
+        # 审批/前端暂停是「等待」，不是「执行」——审批决策另走 approval 事件
+        if status in (
+            StructuredToolResultStatus.APPROVAL_REQUIRED,
+            StructuredToolResultStatus.FRONTEND_PAUSE,
+        ):
+            return
+        outcome = (
+            "ok"
+            if status in (StructuredToolResultStatus.SUCCESS, StructuredToolResultStatus.NO_DATA)
+            else "failed"
+        )
+        self.audit_log.record(
+            event_type="tool_call",
+            payload={
+                "tool": tool_name,
+                "params": params,
+                "result_status": status.value,
+            },
+            outcome=outcome,
+            session_id=self._context_session_id(context),
         )
 
     def get_tools_as_openai(self) -> List[Dict[str, Any]]:

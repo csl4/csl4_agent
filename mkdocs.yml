@@ -14,6 +14,7 @@ nav:
     - Home: index.md
     - 系统架构: architecture.md
     - 多Agent 编排: multi-agent.md
+    - 企业级能力: enterprise.md
     - 实现笔记与踩坑: implementation-notes.md
 
 theme:

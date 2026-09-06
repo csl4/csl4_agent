@@ -37,6 +37,9 @@ from typing import Any, Dict, Generator, List, Optional
 
 from agent.core.a2a.protocol import Task, TaskState, set_task_state
 from agent.core.agents.base_agent import AgentRole, BaseAgent, task_input_text
+from agent.core.cost import CostEstimator
+from agent.core.policy.audit import AuditLog
+from agent.core.policy.hitl import HitlPolicy
 from agent.core.prompts import build_chat_messages
 from agent.core.providers import LLM, ModelResponse
 from agent.core.models import (
@@ -89,6 +92,10 @@ class ToolCallingLLM(BaseAgent):
         name: str = "",
         parent: Optional[BaseAgent] = None,
         knowledge_text: str = "",
+        hitl_policy: Optional[HitlPolicy] = None,
+        audit_log: Optional[AuditLog] = None,
+        cost_estimator: Optional[CostEstimator] = None,
+        record_usage: bool = True,
     ):
         super().__init__(
             agent_id,
@@ -103,6 +110,12 @@ class ToolCallingLLM(BaseAgent):
         self.enable_compaction = enable_compaction
         self.compaction_threshold_ratio = compaction_threshold_ratio
         self.compaction_keep_last_n = compaction_keep_last_n
+        # 企业级 HITL 策略 + 审计（002-enterprise-cli-upgrade US1，T014/T016；
+        # US2 T019/T021：用量/成本估计，FR-005/007）
+        self.hitl_policy = hitl_policy
+        self.audit_log = audit_log
+        self.cost_estimator = cost_estimator
+        self.record_usage = record_usage
 
         # Initialize compaction utilities
         self._compactor = SessionCompactor(
@@ -262,6 +275,10 @@ class ToolCallingLLM(BaseAgent):
                         data={"content": delta},
                     )
 
+            # 企业级：每次 LLM 调用一条 model_call 审计（US2 T019，FR-005/007，
+            #   含 usage + 估算成本；audit_log 为空即零开销）。
+            self._audit_model_call(response, request_context)
+
             # Append assistant message to session history
             assistant_msg: Dict[str, Any] = {"role": "assistant"}
             if response.content:
@@ -272,13 +289,18 @@ class ToolCallingLLM(BaseAgent):
 
             # ⑤ No tool_calls → answer complete
             if not response.tool_calls:
+                turn_usage = self._usage_with_cost(response)
+                yield StreamMessage(
+                    event=StreamEvents.USAGE,
+                    data={"usage": turn_usage},
+                )
                 yield StreamMessage(
                     event=StreamEvents.ANSWER_END,
                     data={
                         "content": response.content,
                         "messages": session_history,
                         "num_llm_calls": i,
-                        "usage": response.usage.model_dump() if response.usage else {},
+                        "usage": turn_usage,
                     },
                 )
                 return
@@ -412,6 +434,11 @@ class ToolCallingLLM(BaseAgent):
                 },
             )
         else:
+            self._audit_error(
+                "",
+                f"Max steps ({self.max_steps}) reached without a final answer.",
+                request_context,
+            )
             yield StreamMessage(
                 event=StreamEvents.ERROR,
                 data={
@@ -445,6 +472,11 @@ class ToolCallingLLM(BaseAgent):
         try:
             params = json.loads(func.get("arguments", "{}"))
         except json.JSONDecodeError:
+            self._audit_error(
+                tool_name,
+                f"Invalid JSON arguments for tool '{tool_name}'",
+                request_context,
+            )
             return ToolCallResult(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -457,19 +489,36 @@ class ToolCallingLLM(BaseAgent):
         # Lazy initialization
         error = self.tool_executor.ensure_toolset_initialized(tool_name)
         if error:
+            self._audit_error(tool_name, error, request_context)
             return StreamMessage(
                 event=StreamEvents.ERROR,
                 data={"error": error, "tool_name": tool_name},
             )
 
         # Determine if this tool call has been approved by the user.
-        # A decision for this call id means the user was prompted for THIS
-        # call (dynamic approval via Tool.requires_approval, e.g. the bash
-        # toolset) - it must be honored regardless of toolset-level patterns.
-        # Decisions are keyed by tool_call_id; tool_name is accepted as a
-        # fallback for callers that don't distinguish parallel calls.
+        # 企业级（US1 T014，FR-003/004）：统一审批入口 = hitl_policy。
+        #   never  → 免审批直跑（守卫仍在 executor 拦截）；
+        #   always → 全部审批：有 approval_callback 走回调，交互环境走
+        #            审批暂停，非交互无回调 → 拒绝 approver=none（0 静默）；
+        #   auto   → 沿用既有 toolset pattern + requires_approval 双检查语义。
+        # 已由用户决策（tool_decisions，tc_id/tool_name）的调用一律优先生效
+        # —— 它是审批暂停后回填的用户真实选择，不随 hitl 模式改变。
         user_approved = False
-        if enable_tool_approval:
+        hitl_decision: Optional[bool] = None
+        if self.hitl_policy is not None:
+            hitl_decision = self.hitl_policy.approve(tool_name, params)
+        if hitl_decision is True:
+            user_approved = True
+        elif hitl_decision is False:
+            # 回调明确拒绝 → 拒绝并审计（approver=none，FR-004）
+            self._audit_approval_blocked(tool_name, params)
+            return self._denial_result(
+                tool_call_id,
+                tool_name,
+                f"Tool '{tool_name}' was denied by the approval policy (approver=none).",
+            )
+        elif enable_tool_approval:
+            # 交互路径（CLI）：查用户决策 → 触发审批暂停
             decision = tool_decisions.get(tool_call_id)
             if decision is None:
                 decision = tool_decisions.get(tool_name)
@@ -477,7 +526,10 @@ class ToolCallingLLM(BaseAgent):
                 if decision:
                     user_approved = True
                 else:
-                    # Explicitly denied
+                    # Explicitly denied（US2 T019：用户拒绝留痕，FR-004）
+                    self._audit_approval_user(
+                        tool_name, params, "denied", request_context
+                    )
                     return ToolCallResult(
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
@@ -487,10 +539,18 @@ class ToolCallingLLM(BaseAgent):
                             params=params,
                         ),
                     )
+            elif self.hitl_policy is not None and self.hitl_policy.always:
+                # hitl=always 无回调 + 交互环境 → 全部工具进入审批暂停
+                return ToolCallResult(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    result=StructuredToolResult(
+                        status=StructuredToolResultStatus.APPROVAL_REQUIRED,
+                        params=params,
+                    ),
+                )
             else:
-                # No decision yet. Tools gated by toolset-level approval
-                # patterns pause here; tools with dynamic approval (bash)
-                # fall through to Tool.invoke -> requires_approval().
+                # hitl=auto：既有 toolset 级 pattern 检查（未决策 → 暂停）
                 toolset_name = self.tool_executor.get_toolset_name(tool_name)
                 toolset = self._get_toolset_by_name(toolset_name)
                 if toolset and self._tool_requires_approval(tool_name, toolset):
@@ -503,6 +563,17 @@ class ToolCallingLLM(BaseAgent):
                             params=params,
                         ),
                     )
+        elif self.hitl_policy is not None and self.hitl_policy.always:
+            # 非交互（serve/scripted）无回调 + hitl=always → 拒绝 approver=none
+            self._audit_approval_blocked(tool_name, params)
+            return self._denial_result(
+                tool_call_id,
+                tool_name,
+                f"Tool '{tool_name}' requires approval but no interactive "
+                "approval is available (approver=none).",
+            )
+        # 其余：hitl=auto 且非交互 → 沿用既有行为（user_approved=False，
+        #       Tool.requires_approval 在 invoke() 内做动态审批）。
 
         # Build the ToolInvokeContext with taint tracking
         invoke_context = ToolInvokeContext(
@@ -533,6 +604,16 @@ class ToolCallingLLM(BaseAgent):
         }
 
     @staticmethod
+    def _parse_tc_arguments(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+        """解析工具调用参数 JSON（损坏时回退空 dict，审计用）。"""
+        try:
+            return json.loads(
+                (tool_call.get("function", {}) or {}).get("arguments", "{}")
+            )
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    @staticmethod
     def _denial_result(tool_call_id: str, tool_name: str, error: str) -> ToolCallResult:
         """构建一个用于回应未执行/被拒绝调用的 ERROR 类型 ToolCallResult。
 
@@ -547,6 +628,108 @@ class ToolCallingLLM(BaseAgent):
                 error=error,
             ),
         )
+
+    def _audit_approval_blocked(self, tool_name: str, params: Dict[str, Any]) -> None:
+        """审批拒绝（approver=none，FR-004）写 `blocked` 审计事件（T016）。"""
+        if self.audit_log is None:
+            return
+        self.audit_log.record(
+            event_type="approval",
+            payload={
+                "tool": tool_name,
+                "reason": "hitl_approver_none",
+                "params": params,
+            },
+            outcome="blocked",
+            approver="none",
+        )
+
+    # ---- 企业级审计埋点（US2 T019，FR-005/007，contracts/audit.md）----
+
+    @staticmethod
+    def _session_id(request_context: Optional[Dict[str, Any]]) -> str:
+        """从 request_context 提取 session_id（缺省空串）。"""
+        if not request_context:
+            return ""
+        return str(request_context.get("session_id", "") or "")
+
+    def _usage_with_cost(self, response: ModelResponse) -> Dict[str, Any]:
+        """把 usage 明细补上 model 与估算成本（ANSWER_END/USAGE/审计共用）。
+
+        始终输出契约的完整键集（contracts/audit.md）：即便供应商未回填 usage，
+        prompt/completion/cache/reasoning 也以 0 占位，保证审计形态稳定。
+        """
+        usage = response.usage.model_dump() if response.usage else {}
+        cost = 0.0
+        if self.record_usage and self.cost_estimator is not None:
+            cost = self.cost_estimator.estimate(
+                response.model,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+        return {
+            "total_tokens": usage.get("total_tokens", 0),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "cache_read": usage.get("cache_read", 0),
+            "cache_write": usage.get("cache_write", 0),
+            "reasoning_tokens": usage.get("reasoning_tokens", 0),
+            "model": response.model,
+            "estimated_cost": round(cost, 6),
+        }
+
+    def _audit_model_call(
+        self, response: ModelResponse, request_context: Optional[Dict[str, Any]]
+    ) -> None:
+        """每次 LLM 调用一条 model_call 审计（含 usage/成本，FR-005/007）。"""
+        if self.audit_log is None:
+            return
+        self.audit_log.record(
+            event_type="model_call",
+            payload={"model": response.model},
+            session_id=self._session_id(request_context),
+            usage=self._usage_with_cost(response),
+        )
+
+    def _audit_approval_user(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        conclusion: str,
+        request_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """用户显式审批决策一条（approved/denied，approver=user，FR-004/005）。"""
+        if self.audit_log is None:
+            return
+        self.audit_log.record(
+            event_type="approval",
+            payload={"tool": tool_name, "params": params, "conclusion": conclusion},
+            outcome="ok" if conclusion == "approved" else "blocked",
+            approver="user",
+            session_id=self._session_id(request_context),
+        )
+
+    def _audit_error(
+        self,
+        tool_name: str,
+        message: str,
+        request_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """系统级错误（工具未找到/参数损坏/超步数）一条 error 事件。"""
+        if self.audit_log is None:
+            return
+        self.audit_log.record(
+            event_type="error",
+            payload={"tool": tool_name or "", "error": message},
+            outcome="failed",
+            session_id=self._session_id(request_context),
+        )
+
+    def set_hitl_mode(self, mode: str) -> None:
+        """运行时切换 HITL 模式（`/hitl <mode>`，T015，FR-003）。"""
+        if self.hitl_policy is None:
+            raise ValueError("No hitl_policy configured on this agent.")
+        self.hitl_policy.set_mode(mode)
 
     def _resolve_orphaned_tool_calls(
         self, messages: List[Dict[str, Any]]
@@ -641,9 +824,22 @@ class ToolCallingLLM(BaseAgent):
                     if isinstance(result, ToolCallResult):
                         session_history.append(result.to_llm_message())
                         executed += 1
+                        # 用户批准留痕（US2 T019，approver=user，FR-004）
+                        self._audit_approval_user(
+                            tool_name=result.tool_name,
+                            params=result.result.params,
+                            conclusion="approved",
+                            request_context=request_context,
+                        )
                 else:
 
                     tool_name = tc.get("function", {}).get("name", "unknown")
+                    self._audit_approval_user(
+                        tool_name=tool_name,
+                        params=_parse_tc_arguments(tc),
+                        conclusion="denied",
+                        request_context=request_context,
+                    )
                     session_history.append(
                         self._denial_result(
                             tool_call_id=tc_id,

@@ -167,3 +167,56 @@ class TestEnvOverrides:
         monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
         config = Config(config_path=tmp_path / "missing.yaml")
         assert config.data["llm"]["api_key"] == "openai-key"
+
+
+class TestEnterpriseConfig:
+    """企业级新增配置段（002-enterprise-cli-upgrade，宪法 III 只增不改）。"""
+
+    def test_new_sections_defaults(self, tmp_path: Path) -> None:
+        """新增段缺省即生效，不影响既有段。"""
+        config = Config(config_path=tmp_path / "missing.yaml")
+        assert config.data["policy"]["hitl_mode"] == "auto"
+        assert config.data["policy"]["workspace_root"] == ""
+        assert config.data["runtime"]["serve_port"] == 8000
+        assert config.data["cost"]["pricing"] == {}
+        assert config.data["eval"]["datasets_dir"] == "eval/datasets"
+        assert config.data["agent"]["record_usage"] is True
+
+    def test_old_config_without_new_sections(self, tmp_path: Path) -> None:
+        """旧版 config.yaml（无 policy/runtime 段）加载零告警、新增段默认生效。"""
+        path = _write_config(tmp_path, "llm:\n  model: test-model\n")
+        config = Config(config_path=path)
+        assert config.data["llm"]["model"] == "test-model"
+        assert config.data["policy"]["hitl_mode"] == "auto"
+        assert config.data["runtime"]["serve_port"] == 8000
+
+    def test_policy_yaml_overrides(self, tmp_path: Path) -> None:
+        """YAML 层可覆盖 policy 段。"""
+        path = _write_config(
+            tmp_path,
+            "policy:\n  hitl_mode: always\n  workspace_root: C:/work\n",
+        )
+        config = Config(config_path=path)
+        assert config.data["policy"]["hitl_mode"] == "always"
+        assert config.data["policy"]["workspace_root"] == "C:/work"
+
+    def test_env_overrides(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量第三层覆盖新增配置点。"""
+        monkeypatch.setenv("AGENT_HITL_MODE", "never")
+        monkeypatch.setenv("AGENT_SERVE_PORT", "9000")
+        monkeypatch.setenv("AGENT_RECORD_USAGE", "0")
+        config = Config(config_path=tmp_path / "missing.yaml")
+        assert config.data["policy"]["hitl_mode"] == "never"
+        assert config.data["runtime"]["serve_port"] == 9000
+        assert config.data["agent"]["record_usage"] is False
+
+    def test_apply_overrides(self, tmp_path: Path) -> None:
+        """CLI 第四层覆盖 policy 段；不传时保持默认（向后兼容既有调用）。"""
+        config = Config(config_path=tmp_path / "missing.yaml")
+        config.apply_overrides(hitl="always", workspace_root="E:/proj")
+        assert config.data["policy"]["hitl_mode"] == "always"
+        assert config.data["policy"]["workspace_root"] == "E:/proj"
+
+        config2 = Config(config_path=tmp_path / "missing.yaml")
+        config2.apply_overrides()
+        assert config2.data["policy"]["hitl_mode"] == "auto"

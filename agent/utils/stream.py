@@ -38,6 +38,13 @@ class StreamEvents(str, Enum):
     MULTI_AGENT_DECOMPOSE = "multi_agent_decompose"
     MULTI_AGENT_SUBAGENT = "multi_agent_subagent"
     MULTI_AGENT_DONE = "multi_agent_done"
+    # ---- 企业级升级事件（002-enterprise-cli-upgrade，向后兼容新增）----
+    USAGE = "usage"  # 回合用量（US2，data 含 usage/cost，contracts/cli.md）
+    # Plan-and-Execute（US3 T028，FR-008，contracts/cli.md）：
+    #   PLAN     = DAG 规划完成（data: tasks/batches）
+    #   PLAN_TASK = 子任务开始/结果（data: task_id/description/status/result/batch）
+    PLAN = "plan"
+    PLAN_TASK = "plan_task"
 
 
 class StreamMessage(BaseModel):

@@ -15,6 +15,41 @@ from agent.core.models import ContextWindowUsage
 from agent.core.providers.base import LLM, ModelResponse
 
 
+def _get_attr(obj: Any, name: str, default: Any = 0) -> Any:
+    """从 usage 明细对象或 dict 取字段（兼容 litellm 两种返回形态）。"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _extract_usage(usage: Any) -> ContextWindowUsage:
+    """从 litellm usage 对象提取完整 token 明细（US2 T020，R-06）。
+
+    cache_read/cache_write/reasoning 各供应商字段名不一，按常见形态回退：
+    - cache_read:  ``cache_read_input_tokens``（新 litellm）或
+                   ``prompt_tokens_details.cached_tokens``（OpenAI 形态）
+    - cache_write: ``cache_creation_input_tokens``
+    - reasoning:   ``completion_tokens_details.reasoning_tokens``
+    """
+    if usage is None:
+        return ContextWindowUsage()
+    prompt_details = _get_attr(usage, "prompt_tokens_details", None)
+    completion_details = _get_attr(usage, "completion_tokens_details", None)
+    cache_read = _get_attr(usage, "cache_read_input_tokens", 0) or 0
+    if not cache_read:
+        cache_read = _get_attr(prompt_details, "cached_tokens", 0) or 0
+    return ContextWindowUsage(
+        total_tokens=_get_attr(usage, "total_tokens", 0) or 0,
+        prompt_tokens=_get_attr(usage, "prompt_tokens", 0) or 0,
+        completion_tokens=_get_attr(usage, "completion_tokens", 0) or 0,
+        cache_read=cache_read,
+        cache_write=_get_attr(usage, "cache_creation_input_tokens", 0) or 0,
+        reasoning_tokens=_get_attr(completion_details, "reasoning_tokens", 0) or 0,
+    )
+
+
 class LiteLLMProvider(LLM):
     """由 LiteLLM 支撑的 LLM 供应商实现。"""
 
@@ -91,11 +126,7 @@ class LiteLLMProvider(LLM):
             content=getattr(message, "content", None),
             tool_calls=tool_calls,
             model=response.model or self.model,
-            usage=ContextWindowUsage(
-                total_tokens=getattr(response.usage, "total_tokens", 0),
-                prompt_tokens=getattr(response.usage, "prompt_tokens", 0),
-                completion_tokens=getattr(response.usage, "completion_tokens", 0),
-            ),
+            usage=_extract_usage(getattr(response, "usage", None)),
         )
 
     def completion_stream(
@@ -187,11 +218,7 @@ class LiteLLMProvider(LLM):
             content="".join(content_parts) or None,
             tool_calls=tool_calls,
             model=model,
-            usage=ContextWindowUsage(
-                total_tokens=getattr(usage, "total_tokens", 0),
-                prompt_tokens=getattr(usage, "prompt_tokens", 0),
-                completion_tokens=getattr(usage, "completion_tokens", 0),
-            ),
+            usage=_extract_usage(usage),
         )
 
     def count_tokens(

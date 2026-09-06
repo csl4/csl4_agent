@@ -15,6 +15,11 @@ class ScriptedLLM(LLM):
 
     记录每次调用的 messages（验证上下文/提示词注入）；回复耗尽后返回
     "(fallback)"。窗口/输出上限给固定大值，保证测试链路不触截断。
+
+    ``responses`` 的每个元素可以是：
+    - ``str``：作为纯文本回复返回（默认）；
+    - ``ModelResponse`` 实例：原样返回——可携带 ``tool_calls`` 用于
+      端到端演练工具调用/守卫拦截（US1 T017 集成测试）。
     """
 
     def __init__(self, responses: list) -> None:
@@ -26,7 +31,10 @@ class ScriptedLLM(LLM):
                    stream=False, response_format=None, drop_params=True) -> ModelResponse:
         self.calls.append(messages)
         if self.responses:
-            return ModelResponse(content=self.responses.pop(0))
+            item = self.responses.pop(0)
+            if isinstance(item, ModelResponse):
+                return item
+            return ModelResponse(content=item)
         return ModelResponse(content="(fallback)")
 
     def count_tokens(self, messages, tools=None) -> ContextWindowUsage:

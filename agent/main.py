@@ -37,7 +37,14 @@ from agent.common.cli_commons import (
 )
 from agent.config import Config
 from agent.core.agents import MainAgent, Orchestrator
+from agent.core.eval.dataset import EvalDatasetError, load_dataset
+from agent.core.eval.metrics import compare_baseline
+from agent.core.eval.runner import OfflineLLM, load_baseline, run_eval, save_baseline
+from agent.core.plan import PlanError, PlanExecutor, merge_plan_results, plan_with_llm
+from agent.core.policy.audit import AuditLog
 from agent.core.prompts import build_chat_messages
+from agent.core.runtime.tasks import DurableTaskManager, queue_db_path
+from agent.core.snapshot import SnapshotManager
 from agent.core.history.store import HistoryStore
 from agent.core.skills.env_info import collect_env_info, format_env_info
 from agent.core.skills.library import Skill, SkillLibrary
@@ -81,6 +88,15 @@ logger = logging.getLogger(__name__)
 CLI_TAG_FILTER = [ToolsetTag.CORE, ToolsetTag.CLI]  # 标签 ["core","cli"]
 
 MUTED_STYLE = "bright_black"
+
+# 企业级 HITL 三态（US1 T015，FR-003，contracts/config.md）
+VALID_HITL_MODES = ("auto", "always", "never")
+
+
+def _validate_hitl(hitl: Optional[str]) -> None:
+    """校验 --hitl 取值；非法即抛出 typer.BadParameter。"""
+    if hitl is not None and hitl not in VALID_HITL_MODES:
+        raise typer.BadParameter(f"--hitl 必须是 {'|'.join(VALID_HITL_MODES)}，收到: {hitl!r}")
 
 
 def _log_level_for_verbosity(verbose: Optional[List[bool]]) -> Optional[str]:
@@ -179,9 +195,14 @@ def _consume_stream(
     agent: ToolCallingLLM,
     messages: List[Dict[str, Any]],
     tool_decisions: Dict[str, bool],
+    session_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """执行一次 call_stream 遍历，边接收事件边打印。
     对于返回数据的处理 也是agent生成器 消费器
+
+    参数:
+        session_id: 会话 ID，随 request_context 传入以便审计事件按会话聚合
+            （US2 T022/T023，FR-005/007）。
 
     返回:
         (final, pause)：final 是回合完成时的 ANSWER_END 数据；
@@ -218,6 +239,9 @@ def _consume_stream(
             messages=messages,
             enable_tool_approval=True,
             tool_decisions=tool_decisions,
+            request_context=(
+                {"session_id": session_id} if session_id else None
+            ),
         ):
             if event.event == StreamEvents.ANSWER_DELTA:
                 # 把流式内容滚进单行转圈里（IDE 伪终端里多行 Live 刷新不可靠）；
@@ -308,6 +332,7 @@ def _run_turn(
     agent: ToolCallingLLM,
     messages: List[Dict[str, Any]],  # 本轮请求的初始消息
     can_prompt: bool,
+    session_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """运行整个会话：循环消费流事件，途中解决审批/前端暂停。
 
@@ -315,21 +340,26 @@ def _run_turn(
         agent: ToolCallingLLM 实例。
         messages: 本轮请求的初始消息。
         can_prompt: 是否可以向用户交互式询问决策。
+        session_id: 会话 ID，透传给 _consume_stream 供审计按会话聚合。
 
     返回:
         (final, session_history)：final 是 ANSWER_END 数据（若会话从未以答案结束则为 None）；
         session_history 是本次回合累积的会话消息（短期记忆）。
     """
     decisions: Dict[str, bool] = {}
+    # 企业级（US2 T023，FR-007/004）：审批决策摘要，附到 final 供 `run --json` 输出。
+    approval_summary: Dict[str, int] = {"approved": 0, "denied": 0, "auto_denied": 0}
     # 短期记忆（session_history）：回合中不断累积的会话消息，随审批/前端暂停而更新。
     # 工作记忆只指「单次 LLM 调用实际看到的窗口」，不是整个会话。
     session_history = list(messages)
 
     while True:
-        final, pause = _consume_stream(agent, session_history, decisions)
+        final, pause = _consume_stream(agent, session_history, decisions, session_id)
 
         if pause is None:
             session_history = final.get("messages") if final else session_history
+            if final is not None:
+                final["approved"] = approval_summary
             return final, session_history
 
         session_history = pause["messages"]
@@ -369,6 +399,7 @@ def _run_turn(
 
                 if approved:
                     decisions[tool_call_id] = True
+                    approval_summary["approved"] += 1
                     # 持久化前缀会扩大所有未来会话的 allow 列表，因此必须
                     # 通过第二次提示明确征得同意（严格 opt-in）。
                     prefixes = item.get("prefixes_to_save") or []
@@ -382,6 +413,10 @@ def _run_turn(
                     # 拒绝型工具消息在恢复时由
                     # ToolCallingLLM._execute_tool_decisions 追加。
                     decisions[tool_call_id] = False
+                    if can_prompt:
+                        approval_summary["denied"] += 1
+                    else:
+                        approval_summary["auto_denied"] += 1
 
         else:  # frontend pause
             print_warning(
@@ -453,8 +488,19 @@ def run(
         "--echo/--no-echo",
         help="Echo back the question provided to the agent in the output",
     ),
+    hitl: Optional[str] = typer.Option(
+        None,
+        "--hitl",
+        help="审批模式: auto|always|never（覆盖 policy.hitl_mode，FR-003）",
+    ),
+    snapshot: bool = typer.Option(
+        False,
+        "--snapshot",
+        help="任务执行前后自动生成快照（FR-012；配置 policy.snapshot_dir 后默认开启）",
+    ),
 ) -> None:
     """提出一次性问题后退出（支持管道输入 stdin）。"""
+    _validate_hitl(hitl)
     log_file = setup_logging(_log_level_for_verbosity(verbose), install_excepthook=True)
     if log_file:
         print_hint(f"日志文件: {log_file}")
@@ -467,6 +513,7 @@ def run(
         base_url=base_url,
         max_steps=max_steps,
         no_compaction=no_compaction,
+        hitl=hitl,
     )
 
     # 提示词优先级：prompt_file > 管道 stdin > 位置参数 prompt
@@ -512,9 +559,23 @@ def run(
     # 只有 stdin 是真实终端时才能交互式审批
     # （管道输入此刻已被消费完毕）。
     can_prompt = sys.stdin.isatty() and not piped_data
+    # 企业级（US2 T022）：会话 ID 随 request_context 进审计，供 history usage 聚合。
+    session_id = f"run-{uuid.uuid4().hex[:8]}"
+    # FR-012：任务执行前后自动生成快照（配置 policy.snapshot_dir 或 --snapshot）。
+    snap_mgr = _snapshot_manager_from_config(config) if snapshot else None
+    workspace_root = _workspace_root_from_config(config)
+    pre_snapshot: Optional[Dict[str, Any]] = None
     final: Optional[Dict[str, Any]] = None
     try:
-        final, _ = _run_turn(agent, messages, can_prompt=can_prompt)
+        if snap_mgr is not None:
+            pre_snapshot = snap_mgr.create_workspace_snapshot(workspace_root)
+            print_hint(f"已生成执行前工作区快照 {pre_snapshot['snapshot_id']}（FR-012）")
+        final, session_history = _run_turn(
+            agent, messages, can_prompt=can_prompt, session_id=session_id
+        )
+        if snap_mgr is not None:
+            post = snap_mgr.create_session_snapshot(session_id, session_history)
+            print_hint(f"已生成执行后会话快照 {post['snapshot_id']}（FR-012）")
     except KeyboardInterrupt:
         print_error("已中断。")
     except Exception as e:
@@ -531,16 +592,74 @@ def run(
         raise typer.Exit(code=1)
 
 
+def _run_plan_turn(
+    llm: Any,
+    tool_executor: Any,
+    user_input: str,
+    session_id: str,
+    max_subagents: int = 4,
+) -> Optional[str]:
+    """Plan-and-Execute 单回合（US3 T028，FR-008，contracts/cli.md）。
+
+    规划（LLM → 子任务 DAG）→ 消费 PLAN/PLAN_TASK 事件流（宪法 II：
+    CLI 只见 StreamMessage）→ 打印归并结果。返回归并文本；失败返回 None
+    （错误已打印，不静默）。
+    """
+    try:
+        tasks = plan_with_llm(llm, user_input)
+    except PlanError as exc:
+        print_error(f"规划失败: {exc}")
+        return None
+
+    executor = PlanExecutor(tool_executor=tool_executor, max_subagents=max_subagents)
+    try:
+        for event in executor.run_stream(tasks, parent_id=f"plan-{session_id}"):
+            if event.event == StreamEvents.PLAN:
+                data = event.data
+                console.print(
+                    f"[bold cyan]规划[/bold cyan] {len(data.get('tasks', []))} 个子任务、"
+                    f"{len(data.get('batches', []))} 个批次（按依赖并行执行）"
+                )
+            elif event.event == StreamEvents.PLAN_TASK:
+                d = event.data
+                print_tool_result(
+                    f"任务[{d.get('task_id', '?')}]",
+                    d.get("status", "?"),
+                    0.0,
+                    invocation=d.get("description"),
+                )
+                result = (d.get("result") or "").strip()
+                if result:
+                    console.print(f"[dim]      → {result}[/dim]")
+    except PlanError as exc:
+        print_error(f"计划执行失败: {exc}")
+        return None
+
+    if executor.last_run is not None:
+        summary = merge_plan_results(executor.last_run)
+        print_agent(summary)
+        return summary
+    return None
+
+
 def _chat_loop(
     agent: Any,
     toolsets: List[Any],
+    plan_mode: bool = False,
+    plan_llm: Any = None,
+    plan_tool_executor: Any = None,
 ) -> None:
     """交互式聊天主循环：每轮消费 agent.call_stream()（单/多Agent 通用）。
 
     `agent` 可以是 ToolCallingLLM（单 Agent）或 MainAgent（多Agent 编排），
     二者均实现同签名 call_stream()（宪法 II：CLI 只见 StreamMessage 事件流）。
+
+    plan_mode：Plan-and-Execute（US3 T028）——每回合独立规划 DAG 并按依赖批次
+    并行执行（经 `_run_plan_turn`），确定性执行路径，不累积会话短期记忆。
     """
     session_history: Optional[List[Dict[str, Any]]] = None
+    # 企业级（US2 T022）：整个交互会话共用一个会话 ID（审计按会话聚合）。
+    session_id = f"cli-{uuid.uuid4().hex[:8]}"
 
     while True:
         try:
@@ -557,6 +676,32 @@ def _chat_loop(
             console.print("[bold magenta]再见！[/bold magenta]")
             break
 
+        # 企业级：/hitl <mode> 运行时切换审批模式（T015，FR-003）
+        if user_input.lower().startswith("/hitl"):
+            parts = user_input.split()
+            if len(parts) != 2 or parts[1] not in VALID_HITL_MODES:
+                print_error(f"用法: /hitl {'|'.join(VALID_HITL_MODES)}")
+                continue
+            if hasattr(agent, "set_hitl_mode"):
+                try:
+                    agent.set_hitl_mode(parts[1])
+                    print_hint(f"审批模式已切换为 {parts[1]}")
+                except Exception as e:  # noqa: BLE001 - CLI 层容错
+                    print_error(f"切换审批模式失败: {e}")
+            else:
+                print_warning("当前模式（多Agent 编排）暂不支持 /hitl 切换。")
+            continue
+
+        # US3 T028：plan 模式——确定性 DAG 规划 + 按依赖批次并行执行
+        # （独立于 ReAct 主循环；每回合不累积短期记忆）。
+        if plan_mode and plan_llm is not None and plan_tool_executor is not None:
+            try:
+                _run_plan_turn(plan_llm, plan_tool_executor, user_input, session_id)
+            except Exception as e:  # noqa: BLE001 - CLI 层容错
+                logger.debug("Plan turn failed", exc_info=True)
+                print_error(f"Plan 回合失败: {e}")
+            continue
+
         messages = build_chat_messages(
             ask=user_input,
             session_history=session_history,
@@ -565,7 +710,9 @@ def _chat_loop(
 
         try:
             # 每轮回合结束，会话的短期记忆随返回的 session_history 更新
-            final, session_history = _run_turn(agent, messages, can_prompt=True)
+            final, session_history = _run_turn(
+                agent, messages, can_prompt=True, session_id=session_id
+            )
         except KeyboardInterrupt:
             print_error("已中断。")
         except Exception as e:
@@ -593,8 +740,19 @@ def chat(
         "--max-subagents",
         help="多Agent 单任务最大并行 SubAgent 数（覆盖 multi_agent.max_subagents）",
     ),
+    hitl: Optional[str] = typer.Option(
+        None,
+        "--hitl",
+        help="审批模式: auto|always|never（覆盖 policy.hitl_mode；交互内可用 /hitl 切换，FR-003）",
+    ),
+    plan: bool = typer.Option(
+        False,
+        "--plan",
+        help="Plan-and-Execute：先产出任务 DAG，按依赖批次并行执行（FR-008，contracts/cli.md）",
+    ),
 ) -> None:
     """与 agent 开始交互式聊天会话（默认命令）。"""
+    _validate_hitl(hitl)
     log_file = setup_logging(_log_level_for_verbosity(verbose), install_excepthook=True)
     if log_file:
         print_hint(f"日志文件: {log_file}")
@@ -607,12 +765,38 @@ def chat(
         base_url=base_url,
         max_steps=max_steps,
         no_compaction=no_compaction,
+        hitl=hitl,
     )
 
     # 多Agent 开关：`--multi-agent` 强制开启；否则由配置 multi_agent.enabled 决定。
     use_multi_agent = multi_agent or bool(
         config.multi_agent_settings().get("enabled", False)
     )
+
+    # Plan-and-Execute（US3 T028，FR-008）：确定性 DAG 执行，独立于多Agent 拆解。
+    if plan:
+        if use_multi_agent:
+            print_hint(
+                "plan 模式接管：--multi-agent/配置拆解被忽略，改用确定性 DAG 规划。\n"
+            )
+        llm, tool_executor, agent = _create_agent(config)
+        print_banner(
+            model=llm.model,
+            tool_count=len(tool_executor.tools_by_name),
+            compaction_enabled=agent.enable_compaction,
+        )
+        print_hint(
+            "Plan-and-Execute 模式：先规划任务 DAG，再按依赖批次并行执行。"
+            "输入你的问题，'/exit' 退出。\n"
+        )
+        _chat_loop(
+            agent,
+            tool_executor.enabled_toolsets,
+            plan_mode=True,
+            plan_llm=llm,
+            plan_tool_executor=tool_executor,
+        )
+        return
 
     if use_multi_agent:
         if not multi_agent:
@@ -666,18 +850,38 @@ def chat(
 
 @app.command()
 def serve(
-    host: Optional[str] = typer.Option(None, "--host", help="Server host"),
-    port: Optional[int] = typer.Option(None, "--port", help="Server port"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Server host"),
+    port: Optional[int] = typer.Option(None, "--port", help="Server port（默认 runtime.serve_port）"),
+    hitl: Optional[str] = typer.Option(
+        None,
+        "--hitl",
+        help="审批模式: never|auto（默认 never——服务无审批界面，危险操作拒绝，FR-004/011）",
+    ),
     config_file: Optional[Path] = opt_config_file,
 ) -> None:
-    """以 FastAPI 服务器形式启动 agent（占位）。
+    """启动 Runtime API（线程/回合/SSE + 持久化后台任务，US4 FR-011）。
 
-    实现后，服务器将使用 toolset_tag_filter=[CORE, CLUSTER]
-    从服务器 API 中排除仅 CLI 专用的工具集。
+    工具标签过滤 [CORE, CLUSTER]（排除仅 CLI 专用工具集）。
+    serve 与 CLI 一样只是 StreamMessage 事件流消费者（宪法 II）。
     """
-    print_hint("服务器模式尚未实现，敬请期待。")
-    print_hint(f"将监听 {host or '0.0.0.0'}:{port or 8000}")
-    print_hint("标签过滤: [CORE, CLUSTER]（服务器模式）")
+    if hitl is not None and hitl not in ("never", "auto"):
+        raise typer.BadParameter("serve 仅支持 --hitl never|auto（服务无人类审批界面）。")
+    config = Config(config_path=config_file)
+    mode = hitl or (config.data.get("policy") or {}).get("hitl_mode", "never")
+    if mode == "always":
+        raise typer.BadParameter(
+            "serve 不能使用 hitl=always（服务无人类审批界面）；请用 never|auto。"
+        )
+    serve_port = port or (config.data.get("runtime") or {}).get("serve_port", 8000)
+
+    # 懒加载：fastapi/uvicorn 是可选依赖（[project.optional-dependencies] server），
+    # 未安装时仅 `agent serve` 报错，其余命令不受影响。
+    from agent.core.runtime.server import create_app
+    import uvicorn
+
+    app = create_app(config=config, hitl_mode=mode)
+    print_hint(f"Runtime API 监听 {host}:{serve_port}（审批模式 {mode}）")
+    uvicorn.run(app, host=host, port=int(serve_port))
 
 
 @app.command()
@@ -877,7 +1081,390 @@ def history_command(
     )
 
 
+def _audit_log_from_config(config_file: Optional[Path]) -> AuditLog:
+    """从配置解析审计日志路径（policy.audit_dir，缺省 ~/.agent/audit）。
+
+    供 `history usage` / `run --json` 用量聚合使用（US2 T022/T023，FR-007）。
+    """
+    config = Config(config_path=config_file)
+    policy = config.data.get("policy") or {}
+    audit_dir = policy.get("audit_dir") or ""
+    if audit_dir:
+        return AuditLog(path=Path(audit_dir).expanduser() / "audit.jsonl")
+    return AuditLog()
+
+
+@history_app.command("usage")
+def history_usage(
+    session_id: Optional[str] = typer.Option(
+        None, "--session-id", help="只聚合指定会话的用量"
+    ),
+    limit: int = typer.Option(
+        100, "--limit", help="最多聚合的 model_call 事件条数（从最新往前）"
+    ),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """按会话聚合模型用量与估算成本（FR-007，SC-004，数据源 audit model_call）。"""
+    audit = _audit_log_from_config(config_file)
+    events = audit.tail(limit=limit, session_id=session_id, event_type="model_call")
+    if not events:
+        print_hint("没有可聚合的用量记录（audit model_call 事件为空）。")
+        return
+
+    # 按会话聚合 token + 估算成本；同一会话可含多个模型（各带 usage.model）
+    rows: Dict[str, Dict[str, Any]] = {}
+    for ev in events:
+        sid = ev.get("session_id") or "(无会话)"
+        usage = ev.get("usage") or {}
+        acc = rows.setdefault(
+            sid,
+            {
+                "model_calls": 0,
+                "models": set(),
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost": 0.0,
+            },
+        )
+        acc["model_calls"] += 1
+        model = usage.get("model") or "?"
+        acc["models"].add(model)
+        acc["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        acc["completion_tokens"] += usage.get("completion_tokens", 0)
+        acc["total_tokens"] += usage.get("total_tokens", 0)
+        acc["estimated_cost"] += usage.get("estimated_cost", 0) or 0
+
+    table = Table(title="用量/成本聚合（audit model_call）")
+    table.add_column("会话", style="bold")
+    table.add_column("调用数")
+    table.add_column("模型")
+    table.add_column("Prompt", style=MUTED_STYLE)
+    table.add_column("Completion", style=MUTED_STYLE)
+    table.add_column("Total")
+    table.add_column("估算成本($)")
+    for sid, acc in rows.items():
+        table.add_row(
+            sid,
+            str(acc["model_calls"]),
+            ", ".join(sorted(acc["models"])),
+            str(acc["prompt_tokens"]),
+            str(acc["completion_tokens"]),
+            str(acc["total_tokens"]),
+            f"{acc['estimated_cost']:.6f}",
+        )
+    console.print(table)
+
+
 app.add_typer(history_app)
+
+
+# ======================= US4：后台任务查询/取消（FR-009/010，contracts/cli.md） =======================
+tasks_app = typer.Typer(
+    name="tasks",
+    help="后台任务查询/取消（投递走 Runtime API，CLI 只做管理视图，US4）",
+    no_args_is_help=True,
+)
+
+
+def _task_manager_from_config(config_file: Optional[Path]) -> DurableTaskManager:
+    """从配置解析任务队列路径并打开 manager（runtime.queue_db，空=~/.agent/runtime.db）。"""
+    return DurableTaskManager(path=queue_db_path(Config(config_path=config_file)))
+
+
+@tasks_app.command("list")
+def tasks_list(
+    scope: Optional[str] = typer.Option(None, "--scope", help="按项目目录过滤"),
+    state: Optional[str] = typer.Option(None, "--state", help="按状态过滤（queued/running/completed/failed/canceled）"),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """列出后台任务（FR-009，per-scope 视图）。"""
+    records = _task_manager_from_config(config_file).list(scope=scope, state=state)
+    table = Table(title="后台任务")
+    table.add_column("任务 ID", style="bold")
+    table.add_column("scope")
+    table.add_column("状态", style=MUTED_STYLE)
+    table.add_column("创建时间", style=MUTED_STYLE)
+    for rec in records:
+        table.add_row(
+            rec["id"],
+            rec["scope"],
+            rec["state"],
+            rec["created_at"],
+        )
+    console.print(table)
+    if not records:
+        print_hint("没有匹配的后台任务。")
+
+
+@tasks_app.command("cancel")
+def tasks_cancel(
+    task_id: str = typer.Argument(..., help="任务 ID"),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """取消后台任务（canceled 优先，迟到结果不覆盖，FR-010）。"""
+    if _task_manager_from_config(config_file).cancel(task_id):
+        console.print(f"[green]已取消[/green] {task_id}")
+    else:
+        print_error(f"任务不可取消（可能已终止）: {task_id}")
+        raise typer.Exit(code=1)
+
+
+app.add_typer(tasks_app)
+
+
+# ======================= US5：快照（FR-012，contracts/cli.md） =======================
+snapshot_app = typer.Typer(
+    name="snapshot",
+    help="会话/工作区快照的查询与恢复（US5，FR-012）",
+    no_args_is_help=True,
+)
+
+
+def _snapshot_dir_from_config(config_file: Optional[Path]) -> Path:
+    """快照目录：policy.snapshot_dir，空=~/.agent/snapshots（B：单一路径来源）。"""
+    d = str(
+        (Config(config_path=config_file).data.get("policy") or {}).get("snapshot_dir") or ""
+    )
+    return Path(d).expanduser() if d else Path.home() / ".agent" / "snapshots"
+
+
+def _snapshot_manager_from_config(config: Config) -> Optional[SnapshotManager]:
+    """FR-012：policy.snapshot_dir 配置后返回 SnapshotManager，否则 None
+    （`agent run --snapshot` 与配置了快照目录时自动开启执行前后快照）。"""
+    d = str((config.data.get("policy") or {}).get("snapshot_dir") or "")
+    return SnapshotManager(Path(d).expanduser()) if d else None
+
+
+def _workspace_root_from_config(config: Config) -> Path:
+    """工作区根：policy.workspace_root，空=当前目录（FR-001）。"""
+    w = str((config.data.get("policy") or {}).get("workspace_root") or "")
+    return Path(w).expanduser() if w else Path.cwd()
+
+
+@snapshot_app.command("list")
+def snapshot_list(
+    kind: Optional[str] = typer.Option(None, "--kind", help="session|workspace"),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """列出快照（最新在前）。"""
+    snaps = SnapshotManager(_snapshot_dir_from_config(config_file)).list_snapshots(kind=kind)
+    table = Table(title="快照")
+    table.add_column("快照 ID", style="bold")
+    table.add_column("类型", style=MUTED_STYLE)
+    table.add_column("时间", style=MUTED_STYLE)
+    table.add_column("会话")
+    for s in snaps:
+        table.add_row(s["snapshot_id"], s["kind"], s["ts"], s.get("session_id", "-"))
+    console.print(table)
+    if not snaps:
+        print_hint("没有快照。")
+
+
+@snapshot_app.command("restore")
+def snapshot_restore(
+    snapshot_id: str = typer.Argument(..., help="快照 ID（agent snapshot list 查看）"),
+    workspace_root: Optional[Path] = typer.Option(
+        None, "--workspace", help="工作区根路径（workspace 快照校验目标，FR-012）"
+    ),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """恢复快照：session 重建会话；workspace 对照工作区校验清单。"""
+    try:
+        out = SnapshotManager(_snapshot_dir_from_config(config_file)).restore(
+            snapshot_id, workspace_root=workspace_root
+        )
+    except FileNotFoundError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1)
+    if out["kind"] == "session":
+        console.print(
+            f"[green]已恢复会话[/green] {out['session_id']}（{len(out['messages'])} 条消息）"
+        )
+        print_hint(f"会话指纹: {out['session_fingerprint'][:16]}…")
+    else:
+        if out["status"] == "ok":
+            console.print(f"[green]工作区清单校验通过[/green] {snapshot_id}")
+        else:
+            print_warning(f"工作区有 {len(out['mismatched'])} 处变更:")
+            for rel in out["mismatched"]:
+                console.print(f"  [red]~[/red] {rel}")
+
+
+app.add_typer(snapshot_app)
+
+
+# ======================= US5：评估（FR-013，contracts/cli.md） =======================
+eval_app = typer.Typer(
+    name="eval",
+    help="评估体系：跑评估/建立基线/列出数据集与基线（US5，FR-013）",
+    no_args_is_help=True,
+)
+
+
+def _eval_dirs_from_config(config_file: Optional[Path]) -> Tuple[Path, Path]:
+    """评估目录：eval.datasets_dir / eval.baseline_dir（B：单一路径来源）。"""
+    e = Config(config_path=config_file).data.get("eval") or {}
+    datasets_dir = Path(str(e.get("datasets_dir") or "eval/datasets")).expanduser()
+    baseline_dir = Path(str(e.get("baseline_dir") or "eval/baselines")).expanduser()
+    return datasets_dir, baseline_dir
+
+
+def _resolve_dataset(datasets_dir: Path, dataset: str) -> Path:
+    """数据集参数 → 路径：显式文件直接用，否则在 datasets_dir 下按名解析。"""
+    p = Path(dataset)
+    if p.is_file():
+        return p
+    for cand in (
+        datasets_dir / dataset,
+        datasets_dir / f"{dataset}.yaml",
+        datasets_dir / dataset / "dataset.yaml",
+    ):
+        if cand.is_file():
+            return cand
+    raise typer.BadParameter(f"数据集不存在: {dataset}（在 {datasets_dir} 下查找）")
+
+
+def _print_eval_report(
+    report: Dict[str, Any],
+    *,
+    baseline: Optional[Dict[str, Any]] = None,
+    regressions: Optional[List[str]] = None,
+) -> None:
+    """打印评估报告（指标 + 基线对比 + 错误案例回流）。"""
+    m = report["metrics"]
+    console.print(f"run_id: [bold]{report['run_id']}[/bold]  案例数: {report['total']}")
+
+    def row(label: str, value: float) -> str:
+        base = baseline.get(label) if baseline else None
+        if base is not None:
+            return f"{value * 100:.1f}%  (基线 {base * 100:.1f}%)"
+        return f"{value * 100:.1f}%"
+
+    table = Table(title="评估指标")
+    table.add_column("指标", style="bold")
+    table.add_column("值")
+    table.add_row("完成率", row("completion_rate", m["completion_rate"]))
+    table.add_row("幻觉率", row("hallucination_rate", m["hallucination_rate"]))
+    table.add_row("误拒绝率", row("false_reject_rate", m["false_reject_rate"]))
+    console.print(table)
+
+    if baseline is None:
+        print_hint("无基线，可用 `agent eval baseline` 建立（SC-007）。")
+    elif regressions:
+        print_warning("相对基线存在能力退化:")
+        for r in regressions:
+            console.print(f"  [red]![/red] {r}")
+    else:
+        console.print("[green]相对基线无退化[/green] (SC-007)")
+
+    review = m.get("review_cases", [])
+    if review:
+        console.print(f"[yellow]错误案例回流 {len(review)} 条（供专家评审）:[/yellow]")
+        for r in review[:10]:
+            console.print(f"  {r['case_id']}  ({r['verdict']})")
+        if len(review) > 10:
+            console.print(f"  … 其余 {len(review) - 10} 条")
+
+
+@eval_app.command("run")
+def eval_run(
+    dataset: str = typer.Argument(..., help="数据集路径或名称（eval.datasets_dir 下）"),
+    baseline: Optional[str] = typer.Option(
+        None, "--baseline", help="对比基线名（默认取数据集同名基线）"
+    ),
+    use_llm: bool = typer.Option(
+        False, "--llm", help="用真实模型（默认 OfflineLLM 离线回归冒烟）"
+    ),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """跑评估并输出三指标 + 基线对比（FR-013/SC-007）。"""
+    datasets_dir, baseline_dir = _eval_dirs_from_config(config_file)
+    path = _resolve_dataset(datasets_dir, dataset)
+    try:
+        cases = load_dataset(path)
+    except EvalDatasetError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1)
+
+    config = Config(config_path=config_file)
+    llm = config.create_llm() if use_llm else OfflineLLM()
+    report = run_eval(cases, llm)
+
+    baseline_name = baseline or path.stem
+    base = load_baseline(baseline_dir / f"{baseline_name}.json")
+    regressions = compare_baseline(report["metrics"], base) if base else None
+    _print_eval_report(report, baseline=base, regressions=regressions)
+
+
+@eval_app.command("baseline")
+def eval_baseline(
+    dataset: str = typer.Argument(..., help="数据集路径或名称"),
+    name: Optional[str] = typer.Option(None, "--name", help="基线名（默认数据集同名）"),
+    use_llm: bool = typer.Option(
+        False, "--llm", help="用真实模型建基线（默认 OfflineLLM 离线）"
+    ),
+    config_file: Optional[Path] = opt_config_file,
+) -> None:
+    """建立/更新基线（SC-007：发版回归对比依据）。"""
+    datasets_dir, baseline_dir = _eval_dirs_from_config(config_file)
+    path = _resolve_dataset(datasets_dir, dataset)
+    try:
+        cases = load_dataset(path)
+    except EvalDatasetError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1)
+
+    config = Config(config_path=config_file)
+    llm = config.create_llm() if use_llm else OfflineLLM()
+    report = run_eval(cases, llm)
+
+    baseline_name = name or path.stem
+    target = baseline_dir / f"{baseline_name}.json"
+    save_baseline(target, report["metrics"])
+    console.print(f"[green]已建立/更新基线[/green] {target}")
+    _print_eval_report(report)
+
+
+@eval_app.command("list")
+def eval_list(config_file: Optional[Path] = opt_config_file) -> None:
+    """列出数据集与基线（FR-013）。"""
+    datasets_dir, baseline_dir = _eval_dirs_from_config(config_file)
+    datasets = sorted(datasets_dir.glob("*.yaml")) if datasets_dir.is_dir() else []
+    baselines = sorted(baseline_dir.glob("*.json")) if baseline_dir.is_dir() else []
+
+    table = Table(title="评估数据集")
+    table.add_column("数据集", style="bold")
+    table.add_column("案例数")
+    for d in datasets:
+        try:
+            count = len(load_dataset(d))
+        except EvalDatasetError:
+            count = "-"
+        table.add_row(d.name, str(count))
+    console.print(table)
+
+    table2 = Table(title="基线")
+    table2.add_column("基线", style="bold")
+    table2.add_column("完成率")
+    table2.add_column("幻觉率")
+    table2.add_column("误拒绝率")
+    for b in baselines:
+        m = load_baseline(b) or {}
+        table2.add_row(
+            b.stem,
+            f"{m.get('completion_rate', 0) * 100:.1f}%",
+            f"{m.get('hallucination_rate', 0) * 100:.1f}%",
+            f"{m.get('false_reject_rate', 0) * 100:.1f}%",
+        )
+    console.print(table2)
+    if not datasets:
+        print_hint("没有数据集（eval.datasets_dir 下 *.yaml）。")
+    if not baselines:
+        print_hint("没有基线。")
+
+
+app.add_typer(eval_app)
 
 
 @app.command()
