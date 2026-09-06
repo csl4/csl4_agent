@@ -1,8 +1,2 @@
-"""面向 Agent 的插件系统。"""
+"""面向 Agent 的插件系统（工具集插件见 `agent/plugins/toolsets/`）。"""
 
-from agent.plugins.interfaces import DestinationPlugin, SourcePlugin
-
-__all__ = [
-    "DestinationPlugin",
-    "SourcePlugin",
-]

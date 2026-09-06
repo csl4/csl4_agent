@@ -106,7 +106,9 @@ def _create_agent(config: Config):
     return llm, tool_executor, agent
 
 
-def _create_multi_agent(config: Config) -> MainAgent:
+def _create_multi_agent(
+    config: Config, max_subagents: Optional[int] = None
+) -> MainAgent:
     """装配多Agent 编排链路（复用组合根：create_llm / create_tool_executor）。
 
     主 Agent 包装现有 ToolCallingLLM（单 Agent 行为不变）；
@@ -114,9 +116,14 @@ def _create_multi_agent(config: Config) -> MainAgent:
     同一 ToolExecutor 执行（FR-001）。
     US3：装配本地技能库（FR-006）、环境信息快照（FR-007）与
     历史存储（FR-008），一并注入编排/主 Agent。
+
+    max_subagents: CLI 显式覆盖（`agent chat --max-subagents`），优先于配置。
     """
     settings = config.multi_agent_settings()
-    print(f"[debug] multi_agent.orchestrator_model={settings.get('orchestrator_model')!r}")  # TODO 调试用
+    if max_subagents is not None:
+        if max_subagents <= 0:
+            raise typer.BadParameter("--max-subagents 必须是正整数。")
+        settings["max_subagents"] = max_subagents
     llm = config.create_llm()
     orchestrator_llm = llm
     if settings.get("orchestrator_model"):
@@ -581,6 +588,11 @@ def chat(
         "--multi-agent",
         help="启用多Agent 编排模式（主/编排/业务/SubAgent 协作，contracts/cli.md）",
     ),
+    max_subagents: Optional[int] = typer.Option(
+        None,
+        "--max-subagents",
+        help="多Agent 单任务最大并行 SubAgent 数（覆盖 multi_agent.max_subagents）",
+    ),
 ) -> None:
     """与 agent 开始交互式聊天会话（默认命令）。"""
     log_file = setup_logging(_log_level_for_verbosity(verbose), install_excepthook=True)
@@ -597,8 +609,18 @@ def chat(
         no_compaction=no_compaction,
     )
 
-    if multi_agent:
-        main_agent = _create_multi_agent(config)
+    # 多Agent 开关：`--multi-agent` 强制开启；否则由配置 multi_agent.enabled 决定。
+    use_multi_agent = multi_agent or bool(
+        config.multi_agent_settings().get("enabled", False)
+    )
+
+    if use_multi_agent:
+        if not multi_agent:
+            print_hint(
+                "multi_agent.enabled=true 已自动启用多Agent 编排模式"
+                "（可用 agent chat --multi-agent 显式指定）。\n"
+            )
+        main_agent = _create_multi_agent(config, max_subagents=max_subagents)
         tool_executor = (
             main_agent.orchestrator.tool_executor
             if main_agent.orchestrator is not None

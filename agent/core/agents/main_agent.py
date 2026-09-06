@@ -161,9 +161,14 @@ class MainAgent(BaseAgent):
         yield StreamMessage(
             event=StreamEvents.ANSWER_DELTA, data={"content": final_text}
         )
+        # 与 ToolCallingLLM 一致：把 assistant 回复追加进消息，供 _run_turn
+        # 更新 session_history —— 否则多Agent 模式下每轮上下文不累积（多轮失效）。
         yield StreamMessage(
             event=StreamEvents.ANSWER_END,
-            data={"content": final_text, "messages": list(messages)},
+            data={
+                "content": final_text,
+                "messages": list(messages) + [{"role": "assistant", "content": final_text}],
+            },
         )
 
     def _subtask_events(self) -> List[Dict[str, Any]]:

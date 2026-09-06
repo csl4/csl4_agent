@@ -187,3 +187,16 @@ if response.tool_calls: assistant_msg["tool_calls"] = response.tool_calls
 - `logging.FileHandler`（含 `RotatingFileHandler`）默认 `encoding=None`，走系统 locale；Windows 中文系统是 cp936（GBK），UTF-8 消息必然出问题。
 - 解决办法：构造 handler 时显式 `encoding="utf-8"`。所有 str 都能编码为 UTF-8，因此只设 `encoding` 即可，无需再配 `errors=`。
 - 见 `agent/utils/log.py` 的 `RotatingFileHandler` 装配。
+
+## 六、已知局限 / v1 范围外
+
+多Agent 链路已交付核心闭环（拆解 → 并行调度 → 归并 → 归纳），以下为明确留待后续的能力，不在 v1 范围内：
+
+- **FR-010 子任务失败自动重试/改策**：编排层只把失败结果归并进最终答复，不做「失败 → 业务 Agent 决策重试/换策」的闭环（spec.md US1 验收场景 #2 未实现）。重试仅存在于 A2A 传输层的 tenacity 封装。
+- **Ctrl+C 取消传播**：CLI 中断只退出进程，未向在飞 SubAgent 传播 `canceled` 状态，也无进程树清理协调（contracts/a2a.md 承诺的结构化取消未实现）。
+- **配置未迁移 Pydantic**：`agent/config.py` 用 plain dict + `_deep_merge` 实现四层覆盖，宪法 III 的 `extra="allow"` + `model_validator` 模式尚未落地（当前无字段重命名需求，故未迁移）。
+- **`input-required` 状态未用**：`TaskState` 枚举里存在，但无任何代码路径设置或处理该状态。
+- **`file` Part 未用**：`protocol.py` 只有 text/data 的构造助手，无 SubAgent 产出或消费文件 artifact。
+- **AgentCard 未用于发现**：`agent_card_for()` 存在，但 main → orchestrator 是硬编码引用；`agent agents list` 用硬编码表行，无基于 AgentCard 的动态发现。
+- **`stream_task()` 是骨架**：`InProcessA2AClient.stream_task` 只产 submitted/working/terminal 三个快照，生产路径只用 `send_task`。
+- **`multi_agent.a2a.transport` 配置未消费**：transport 硬编码为 in-process，配置里的 `a2a.transport` 字段当前是死配置。

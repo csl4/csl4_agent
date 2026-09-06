@@ -1,17 +1,15 @@
 # ============================================================
-# MkDocs 最小配置模板 —— 改 site_name / site_url / repo_url 即可用
-# 完整版参考 HolmesGPT 的 mkdocs.yml
+# Agent 文档站配置 —— 导航在 nav: 段显式声明（不用 awesome-nav）
+# 有部署域名时把 site_url 从 example.com 换成真实地址
 # ============================================================
 
 site_name: Agent
 site_description: General-purpose LLM Agent framework
 site_url: https://example.com/
-repo_url: https://github.com/YOUR_ORG/YOUR_REPO
-repo_name: YOUR_ORG/YOUR_REPO
-edit_uri: edit/master/docs/
+repo_url: https://github.com/csl4/csl4_agent
+repo_name: csl4/csl4_agent
+edit_uri: edit/main/docs/
 
-# 方式 A: 用 awesome-nav 插件 → nav 留空或按需覆盖
-# 方式 B: 不用 awesome-nav → 在这里写完整导航
 nav:
     - Home: index.md
     - 系统架构: architecture.md
@@ -56,7 +54,6 @@ theme:
         code: Fira Code
 
 plugins:
-    - awesome-nav
     - search
     - glightbox
 
@@ -94,9 +91,6 @@ markdown_extensions:
     - pymdownx.tasklist:
           custom_checkbox: true
     - pymdownx.tilde
-
-extra_css:
-    - stylesheets/extra.css
 
 extra_javascript:
     - https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js

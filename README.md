@@ -20,10 +20,10 @@ agent chat --multi-agent   # 多Agent 编排模式
 
 | 功能 | 说明 |
 |---|---|
-| CLI 交互 | `run` / `chat` / `serve` / `toolset` / `version` |
+| CLI 交互 | `chat`（含 `--multi-agent`）/ `run` / `serve`（占位）/ `toolset` / `agents list` / `skills list\|add\|rm` / `history session\|command` / `version` |
 | 工具执行 | 插件化 `Toolset` / `Tool`，审批流 + 白名单 + 敏感路径拦截 |
 | 上下文管控 | 超限压缩（`SessionCompactor`）、token 阈值体检 |
-| 多Agent 编排 | 主 / 编排 / 业务 / 动态 SubAgent，A2A 协议（`a2a-sdk`） |
+| 多Agent 编排 | 主 / 编排 / 业务 / 动态 SubAgent；v1 进程内 A2A transport，基于 `a2a-sdk` protobuf 类型（`agent/core/a2a/`） |
 | 终端适配 | PowerShell / bash / zsh 探测与命令改写 |
 | 轻量沙箱 | 子进程隔离 + 超时 + 受控工作目录 |
 | 技能注入 | 本地技能库按任务自动匹配，注入提示词 |
@@ -44,4 +44,4 @@ poetry run pytest tests -m "not llm"   # 离线单测 + 集成测试
 ## 配置
 
 - 配置文件：`~/.agent/config.yaml`
-- 关键环境变量：`AGENT_API_KEY`、`AGENT_MODEL`
+- 关键环境变量：`AGENT_API_KEY`（回退 `OPENAI_API_KEY`）、`AGENT_MODEL`、`AGENT_BASE_URL`、`AGENT_MAX_STEPS`、`AGENT_MULTI_AGENT`、`AGENT_MAX_SUBAGENTS`
