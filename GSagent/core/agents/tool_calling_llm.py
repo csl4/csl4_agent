@@ -139,7 +139,8 @@ class ToolCallingLLM(BaseAgent, AuditUsageMixin):
     def run_task(self, task: Task) -> Task:
         """无头模式：消费一轮 call_stream 并完成 Task（A2A 协议兼容）。"""
         text = task_input_text(task, self)
-        messages = self.context_messages()
+        # context 现为 BaseMessage → dict 视图喂 call_stream（保持外部 dict 契约）
+        messages = self.context_dicts()
         if not messages:
             messages = build_chat_messages(
                 ask=text,

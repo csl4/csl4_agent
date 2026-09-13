@@ -25,17 +25,28 @@ class AuditUsageMixin:
             return ""
         return str(request_context.get("session_id", "") or "")
 
-    def _usage_with_cost(self, response: ModelResponse) -> Dict[str, Any]:
+    def _usage_with_cost(self, response: Any) -> Dict[str, Any]:
         """把 usage 明细补上 model 与估算成本（ANSWER_END/USAGE/审计共用）。
 
-        始终输出契约的完整键集（contracts/audit.md）：即便供应商未回填 usage，
-        prompt/completion/cache/reasoning 也以 0 占位，保证审计形态稳定。
+        002-langchain-ecosystem：response 为 langchain ``AIMessage`` 时经
+        ``extract_usage`` 提取 token；旧 ``ModelResponse``（subagent 兼容）按既有逻辑。
+        始终输出契约的完整键集（contracts/audit.md）。
         """
-        usage = response.usage.model_dump() if response.usage else {}
+        usage: Dict[str, Any]
+        model: str
+        if hasattr(response, "response_metadata"):  # AIMessage
+            from GSagent.core.llm_adapter import extract_usage
+
+            u = extract_usage(response)
+            usage = u.model_dump()
+            model = (response.response_metadata or {}).get("model") or ""
+        else:  # ModelResponse 旧路径
+            usage = response.usage.model_dump() if response.usage else {}
+            model = getattr(response, "model", "") or ""
         cost = 0.0
         if self.record_usage and self.cost_estimator is not None:
             cost = self.cost_estimator.estimate(
-                response.model,
+                model,
                 usage.get("prompt_tokens", 0),
                 usage.get("completion_tokens", 0),
             )
@@ -46,19 +57,23 @@ class AuditUsageMixin:
             "cache_read": usage.get("cache_read", 0),
             "cache_write": usage.get("cache_write", 0),
             "reasoning_tokens": usage.get("reasoning_tokens", 0),
-            "model": response.model,
+            "model": model,
             "estimated_cost": round(cost, 6),
         }
 
     def _audit_model_call(
-        self, response: ModelResponse, request_context: Optional[Dict[str, Any]]
+        self, response: Any, request_context: Optional[Dict[str, Any]]
     ) -> None:
         """每次 LLM 调用一条 model_call 审计（含 usage/成本，FR-005/007）。"""
         if self.audit_log is None:
             return
+        if hasattr(response, "response_metadata"):  # AIMessage
+            model = (response.response_metadata or {}).get("model") or ""
+        else:  # ModelResponse 旧路径
+            model = getattr(response, "model", "") or ""
         self.audit_log.record(
             event_type="model_call",
-            payload={"model": response.model},
+            payload={"model": model},
             session_id=self._session_id(request_context),
             usage=self._usage_with_cost(response),
         )

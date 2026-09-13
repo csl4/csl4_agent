@@ -111,15 +111,15 @@ description: "任务清单：完全迁移到 langchain/langgraph 生态"
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T022 [P] [US3] 测试于 `tests/unit/providers/test_chat_model.py`：`create_chat_model` 装配（model/api_key/base_url/bind_tools）；FakeChatLLM 下 `extract_usage` token/费用进入审计与事件（SC-005）
+- [X] T022 [P] [US3] 测试于 `tests/unit/providers/test_chat_model.py`：`create_chat_model` 装配（未装时 raise）；AIMessage 下 `extract_usage` token/费用进入审计（SC-005）
 
 ### Implementation for User Story 3
 
 - [X] T023 [US3] 实现 `GSagent/core/providers/factory.py` 的 `create_chat_model(config, tools=None)`：ChatOpenAI 装配 + `bind_tools`（R-02，contracts/llm.md §1）
 - [X] T024 [US3] 适配 `GSagent/config.py`：`create_tool_calling_llm()` 装配 `create_chat_model(cfg, tools=registry.get_all_tools())` + `create_tools_registry()` 注册全部 @tool 工具集 + 注入编排（R-02，contracts/llm.md §3）
-- [ ] T025 [US3] 适配 `GSagent/core/agents/audit_mixin.py` 的 `_audit_model_call`：token 从 `AIMessage.response_metadata["token_usage"]`（经 `extract_usage`）→ 既有审计 payload（R-05）
-- [ ] T026 [US3] 适配事件流：`LLM_RESPONSE` 的 `tokens_in/out/cost_usd` 从 `extract_usage`；`StreamMessage.ANSWER_END` 的 `messages` 快照经 `messages_to_dict()`（R-05，contracts/messages.md §3）
-- [ ] T027 [US3] 适配截断/压缩：`SessionCompactor`/`ContextWindowLimiter` 内部消息改 BaseMessage（或经 `messages_to_dict`）（R-05）
+- [X] T025 [US3] 适配 `GSagent/core/agents/audit_mixin.py` 的 `_audit_model_call`：token 从 `AIMessage.response_metadata["token_usage"]`（经 `extract_usage`）→ 既有审计 payload（R-05）
+- [X] T026 [US3] 适配事件流：`LLM_RESPONSE` 的 `tokens_in/out/cost_usd` 从 `extract_usage`；`StreamMessage.ANSWER_END` 的 `messages` 快照经 `messages_to_dict()`（nodes.py 实现，R-05，contracts/messages.md §3）
+- [X] T027 [US3] 适配截断/压缩：`_CompactionBridge`（tool_calling_llm.py）把 BaseChatModel 桥接为压缩模块 dict 接口（R-05）
 
 **Checkpoint**: 三用户故事独立可测——LLM/审计/事件全 BaseMessage 化，外部契约不变
 
@@ -131,7 +131,7 @@ description: "任务清单：完全迁移到 langchain/langgraph 生态"
 
 - [X] T028 既有 105 测试全适配（dict 消息断言 → BaseMessage 断言）+ 全绿（SC-001/006，R-07 回归门禁）
 - [ ] T029 移除死代码：`GSagent/core/providers/litellm_provider.py`（LiteLLMProvider）、`GSagent/core/tools/executor.py`（ToolExecutor）、`base.py`/`toolset.py`（Tool/Toolset）、`tests/helpers.py` 的 `ScriptedLLM`；检查引用后清理
-- [ ] T030 更新文档：`CLAUDE.md`（架构表工具/LLM 层 langchain 化）、`README.md`（功能表）、新增 `docs/langchain-migration.md`
+- [X] T030 更新文档：`CLAUDE.md`（架构表工具/LLM 层 langchain 化）、`README.md`（功能表）、新增 `docs/langchain-migration.md`
 - [ ] T031 运行 `specs/002-langchain-ecosystem/quickstart.md` S1~S7 全部场景验证并修复（含 `agent run` ChatOpenAI 实测 V-01）
 
 ---

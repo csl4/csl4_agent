@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from langchain_core.messages import AIMessage, BaseMessage
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from GSagent.core.a2a.protocol import (
@@ -28,6 +29,7 @@ from GSagent.core.a2a.protocol import (
     set_task_state,
     task_message_text,
 )
+from GSagent.core.llm_adapter import dict_to_messages, messages_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -106,34 +108,44 @@ class BaseAgent(ABC):
         self.role = role
         self.name = name or f"{role.value}-{agent_id}"
         self.parent = parent
-        # 内部消息列表：OpenAI 风格结构化消息字典 `{"role": ..., "content": ...}`，
-        # 可直接喂 LLM（无需在消息里混入 task 元数据）。
-        self.context: List[Dict[str, Any]] = []
+        # 内部消息列表：langchain BaseMessage（002-langchain-ecosystem）。
+        # 可直接喂 BaseChatModel/编排；add_context 兼容 dict 输入（经转换）。
+        self.context: List[BaseMessage] = []
         # task_id → 原始任务文本（task_input_text 优先读取，见下）。
         self.task_inputs: Dict[str, str] = {}
         # US3 FR-007：环境/知识上下文，注入该角色的 LLM 提示词（无 LLM 的角色忽略）。
         self.knowledge_text = knowledge_text
 
     # ---- 上下文管理 ----
-    def add_context(self, message: Dict[str, Any]) -> None:
-        """把一条 OpenAI 风格消息字典追加到本 Agent 的上下文窗口。"""
-        self.context.append(message)
+    def add_context(self, message: Any) -> None:
+        """把一条消息追加到本 Agent 上下文（BaseMessage 或 OpenAI dict）。"""
+        if isinstance(message, BaseMessage):
+            self.context.append(message)
+        else:
+            # dict 兼容（send 旧调用 / 外部输入）
+            converted = dict_to_messages([message])
+            self.context.extend(converted)
 
     def record_task_input(self, task_id: str, text: str) -> None:
         """记录一次 Task 的原始输入文本（供 task_input_text 读取）。"""
         self.task_inputs[task_id] = text
 
-    def context_messages(self) -> List[Dict[str, Any]]:
-        """当前上下文消息快照。"""
+    def context_messages(self) -> List[BaseMessage]:
+        """当前上下文消息快照（langchain BaseMessage）。"""
         return list(self.context)
+
+    def context_dicts(self) -> List[Dict[str, Any]]:
+        """上下文消息的 OpenAI dict 视图（多 Agent 兼容 / 外部消费）。"""
+        return messages_to_dict(self.context)
 
     def context_text(self) -> str:
         """上下文文本视图（供 LLM 提示词使用）。"""
         lines = []
         for msg in self.context:
-            text = message_text(msg.get("content") if isinstance(msg, dict) else "")
+            text = message_text(getattr(msg, "content", ""))
             if text:
-                lines.append(f"[{msg.get('role', '?')}] {text}")
+                role = getattr(msg, "type", "?")
+                lines.append(f"[{role}] {text}")
         return "\n".join(lines)
 
     # ---- 协作：发送 ----
@@ -142,10 +154,10 @@ class BaseAgent(ABC):
         """发送一条消息给目标 Agent，返回携带的 Task。
 
         若未显式传 task，则新建一个 SUBMITTED Task 作为本次协作的工作单元。
-        消息以 OpenAI 风格字典 `{"role": "assistant", "content": text}` 写入双方上下文。
+        消息以 langchain ``AIMessage(content=text)`` 写入双方上下文（002 生态化）。
         """
         out_task = task or make_task(f"{self.agent_id}->{to.agent_id}")
-        msg: Dict[str, Any] = {"role": "assistant", "content": text}
+        msg = AIMessage(content=text)
         self.add_context(msg)
         to.add_context(msg)
         logger.debug(

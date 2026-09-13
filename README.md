@@ -20,7 +20,7 @@ agent chat --multi-agent   # 多Agent 编排模式
 | 功能 | 说明 |
 |---|---|
 | CLI 交互 | `chat`（含 `--multi-agent`）/ `run` / `serve` / `toolset` / `agents list` / `skills list\|add\|rm` / `history session\|usage` / `tasks list\|cancel` / `snapshot list\|restore` / `eval run\|baseline\|list` / `version`；chat 内斜杠命令 `/exit` `/hitl` `/memory` `/tool` `/skill` `/remember` |
-| 工具执行 | 插件化 `Toolset` / `Tool`，审批流 + 白名单 + 敏感路径拦截 |
+| 工具执行 | langchain `@tool` 工具集（`ToolRegistry` + 守卫/审批包装），命令前缀校验 + 敏感路径拦截 + 动态审批（`interrupt()` 人在回环） |
 | 企业级安全策略 | 统一策略层（`GSagent/core/policy/`）：PathGuard / CommandGuard / AuditLog / HITL 三态（auto/always/never），工作区外与破坏性命令审批前拦截；输入/输出侧 Guardrail（`input_guard.py` / `output_guard.py`，注入/违规拦截 + 结构化输出校验） |
 | 审计与用量 | 审计 JSONL 全量留痕（密钥脱敏）+ token 消耗与本地定价成本估算（`history usage`） |
 | 上下文管控 | 超限压缩（`SessionCompactor`）、token 阈值体检 |

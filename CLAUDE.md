@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-通用 LLM Agent 框架（Python 3.10+）：CLI 交互（Typer）+ 工具执行（插件化 Toolset/Tool）+ 多Agent 编排（A2A 协议，主/编排/业务/动态 SubAgent 四角色）+ 企业级安全策略层（HITL 审批 / 路径与命令守卫 / 审计）。本地优先、离线可测，跨终端（PowerShell / bash / zsh）自动适配。
+通用 LLM Agent 框架（Python 3.10+）：CLI 交互（Typer）+ langchain 工具（@tool + ToolRegistry + ToolNode）+ LangGraph 显式编排 + 多Agent 编排（A2A 协议，主/编排/业务/动态 SubAgent 四角色）+ 企业级安全策略层（HITL 审批 / 路径与命令守卫 / 审计）。本地优先、离线可测，跨终端（PowerShell / bash / zsh）自动适配。
 
 ## Development Commands
 
@@ -35,7 +35,7 @@ mypy
 |---|---|---|
 | CLI 入口 | `GSagent/main.py` | 命令路由、配置加载（`run`/`chat`/`serve`/`toolset`/`agents`/`skills`/`history`/`tasks`/`snapshot`/`eval`/`version`） |
 | 配置 | `GSagent/config.py` | 组合根：`create_llm` / `create_tool_executor` / `create_tool_calling_llm` / `policy_components` / `create_cost_estimator`；四层覆盖（默认←YAML←环境变量←CLI） |
-| 核心引擎 | `GSagent/core/` | ToolCallingLLM 外壳（`core/agents/tool_calling_llm.py`，外部契约不变）、LangGraph 编排层（`core/orchestration/`：state/graph/nodes，宪法 3.2 显式图）、工具执行器（`core/tools/executor.py`）、多Agent 角色、A2A、提示词、截断、供应商 |
+| 核心引擎 | `GSagent/core/` | ToolCallingLLM 外壳（`core/agents/tool_calling_llm.py`，外部契约不变）、LangGraph 编排层（`core/orchestration/`：state/graph/nodes，宪法 3.2 显式图）、langchain 工具注册表（`core/tools/registry.py`，@tool + 守卫/审批包装 + 动态审批）、多Agent 角色、A2A、提示词、截断、LLM 装配（`core/providers/factory.py`，ChatOpenAI） |
 | 安全策略 | `GSagent/core/policy/` | PathGuard / CommandGuard / HitlPolicy / AuditLog + 输入/输出侧 Guardrail（`input_guard.py` / `output_guard.py`，宪法 11.1 三道 Guardrail），注入 ToolExecutor 与 ToolCallingLLM |
 | Plan-and-Execute | `GSagent/core/plan/` | LLM 产出任务 DAG，按依赖拓扑批次并行执行，失败定位 |
 | 运行时 | `GSagent/core/runtime/` | `serve`（FastAPI：线程/回合/SSE）+ SQLite 持久化任务队列（原子租约、取消保护、崩溃恢复） |
@@ -44,7 +44,7 @@ mypy
 | 快照 / 成本 | `GSagent/core/` | `snapshot.py`（执行前后自动快照）、`cost.py`（本地定价成本估算） |
 | 终端适配 | `GSagent/core/env/terminal.py` | PowerShell / bash / zsh 探测与命令改写 |
 | 可观测对象模型 | `GSagent/core/observability/` | 业务与可观测四层对象（会话→任务→Agent→事件）+ 九类事件 + 指标聚合（仅事件流）+ 业务↔A2A 协议映射；`telemetry.py` 为 OTel 接入（方案 A 自动埋点 + 手动业务 span，`observability.enabled` 关闭即零初始化）；`emitter.py` 事件流接线（AgentEventEnvelope 随执行产生，trace/span_id 取自 OTel context） |
-| 插件系统 | `GSagent/plugins/toolsets/` | 工具集插件（bash/filesystem/sandbox/memory/yaml_loader），注册于 `BUILTIN_PYTHON_TOOLSETS` |
+| 插件系统 | `GSagent/plugins/toolsets/` | langchain `@tool` 工具集（bash/filesystem/sandbox/memory 的 `lc_tools.py` + `yaml_lc_loader.py`），`Config.create_tools_registry()` 注册进 ToolRegistry |
 | 通用工具 | `GSagent/utils/` | rich console、StreamEvents 事件流、日志、文件/流式 IO |
 
 ### CLI 命令一览
@@ -67,7 +67,7 @@ chat 内斜杠命令：`/exit` `/hitl <mode>` `/remember <内容>` `/memory [que
 
 ### Key Patterns
 
-- **插件架构**：每个工具集（`Toolset`）定义可用工具和参数，注册于 `GSagent/plugins/toolsets/__init__.py` 的 `BUILTIN_PYTHON_TOOLSETS`（名字→工厂 dict，工厂签名 `(install_config) -> Toolset|None`）；核心引擎不依赖具体工具细节
+- **插件架构**：每个工具集以 langchain `@tool` 装饰器定义（`lc_tools.py`），工厂 `create_xxx_tools(config)` 返回 `@tool` 列表；`Config.create_tools_registry()` 注册进 `ToolRegistry`（含守卫/审批包装）；bash/sandbox 的**动态审批**（`validate_command` 三态）经工具返回值信号 + 编排 `interrupt()` 处理；核心引擎不依赖具体工具细节
 - **组合根**：`Config` 是唯一装配点，`main.py` 只从这里拿拼好的对象（构造函数注入，不内部 new）；CLI 只消费 `StreamMessage` 事件流，不接触底层 Tool/Toolset（宪法 II）
 - **配置向后兼容**：重命名字段时用 Pydantic `extra="allow"` + `model_validator` 映射旧名，不在 schema 中保留废弃字段（宪法 III；当前 `config.py` 用 dict + `_deep_merge`，尚未迁移 Pydantic，见 docs/implementation-notes.md）
 - **类层次结构**：新增字段/方法时放在最通用的层级（如 `BaseAgent` 承载公共编排行为），不要因 issue 提到特定子类就限缩范围（宪法 V）
