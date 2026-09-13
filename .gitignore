@@ -18,6 +18,9 @@ venv/
 env/
 .env*
 
+# Agent runtime data (config/logs/audit/memory/etc.)
+.GSagent/
+
 # Spec Kit / IDE / OS
 .idea/
 .vscode/

@@ -1,84 +1,505 @@
-<!--
-## Sync Impact Report
-- Version change: n/a (initial ratification) → 1.0.0
-- Modified principles: none (initial ratification)
-- Added sections: Core Principles (5), Engineering Standards, Git Workflow, Governance
-- Removed sections: none
-- Follow-up TODOs: none
--->
+# ⚖️ Agent 开发宪法
 
-# New Agent Constitution
+> 版本 v1.0 ｜ 2026-09-13
+> 整理自《agent 面试知识库 PRO》《面经梳理六期》《技术分享》《项目面试》《后端八股》十份资料
+> 配套文档：《OpenTelemetry + LangGraph 使用操作文档》
 
-## Core Principles
+---
 
-### I. Plugin-First Architecture
+## 目录
 
-Every capability is delivered as a dynamically loaded plugin/toolset. Plugins
-define their own available tools and parameters and are loaded via configuration.
-The core engine MUST stay agnostic of specific tool details and communicate only
-through the plugin interfaces.
+1. [序章：本宪法如何使用](#序章本宪法如何使用)
+2. [第一章 总纲：五条宪法原则](#第一章-总纲五条宪法原则)
+3. [第二章 架构宪法](#第二章-架构宪法)
+4. [第三章 推理与规划宪法](#第三章-推理与规划宪法)
+5. [第四章 单/多 Agent 裁决宪法](#第四章-单多-agent-裁决宪法)
+6. [第五章 Prompt 宪法](#第五章-prompt-宪法)
+7. [第六章 上下文宪法](#第六章-上下文宪法)
+8. [第七章 记忆宪法](#第七章-记忆宪法)
+9. [第八章 RAG 宪法](#第八章-rag-宪法)
+10. [第九章 工具与 MCP 宪法](#第九章-工具与-mcp-宪法)
+11. [第十章 执行与可靠性宪法](#第十章-执行与可靠性宪法)
+12. [第十一章 安全宪法](#第十一章-安全宪法)
+13. [第十二章 后端服务宪法](#第十二章-后端服务宪法)
+14. [第十三章 可观测与评测宪法](#第十三章-可观测与评测宪法)
+15. [第十四章 发布与变更宪法](#第十四章-发布与变更宪法)
+16. [附录 A：红线数字速查表](#附录-a红线数字速查表)
+17. [附录 B：开工 / 上线检查清单](#附录-b开工--上线检查清单)
 
-*Rationale*: keeps the core stable while the toolset grows without core churn.
+---
 
-### II. CLI Interface
+## 序章：本宪法如何使用
 
-Every feature MUST be exposed through the Typer-based CLI (`run` / `chat` /
-`serve` / `toolset` / `version`). The CLI consumes only the `StreamMessage`
-event stream and MUST NOT reach into `Tool`/`Toolset` internals.
+本宪法是 Agent 快速开发的**"做事底线 + 决策依据"**：写代码前按章节对照架构，卡壳时按速查表做决策，上线前按检查清单过闸。**宪法管原则与红线，配套文档管具体操作**：
 
-*Rationale*: decoupling keeps the CLI thin, scriptable, and independently testable.
+| 场景 | 查哪里 |
+|---|---|
+| 要不要拆多 Agent？工具放几个？ | 第四章 + 附录 A 红线表 |
+| Prompt 怎么组织、怎么评估？ | 第五章 + 第六章 |
+| LangGraph 怎么写、Trace 怎么接？ | 配套文档《OTel + LangGraph 使用操作文档》（代码级操作） |
+| 上线前最后一关 | 第十四章 + 附录 B 检查清单 |
 
-### III. Config Backward Compatibility
+> 📖 **阅读约定**：`【法条】` = 必须遵守的硬规则，违反即返工；普通文字 = 建议与理由。
 
-Config renames MUST be handled via Pydantic `extra="allow"` plus a
-`model_validator` that maps old field names to new ones. Deprecated fields MUST
-NOT remain in the schema.
+---
 
-*Rationale*: existing user config files keep working across upgrades without a
-forced migration.
+## 第一章 总纲：五条宪法原则
 
-### IV. Test-First (NON-NEGOTIABLE)
+> **【宪法第一条】下限优先于上限。** 先回答三个问题再谈能力：坏了怎么办？错了怎么拦？出事怎么追？一个 Agent 的真正价值 = 稳定完成任务 + 优于替代方案 + 单位成功成本可接受，而不是"会很多事"。
 
-New features require unit tests; new plugins require integration tests. Test
-files mirror the source layout (`tests/` mirrors `src/`). HTTP mocking MUST use
-the `responses` library, never `@patch("requests.get")`. LLM-dependent tests
-MUST be tagged `llm` and run separately from the offline suite.
+> **【宪法第二条】确定性交给代码，模糊性交给模型，高风险交给人。** 规则、校验、路由、权限、格式约束——全部用代码实现，不指望 Prompt；语义理解、推理、生成——交给模型；不可逆操作（删库、发邮件、支付）——必须有人工确认节点。
 
-*Rationale*: keeps the offline test suite deterministic and fast while coverage
-stays aligned with source structure.
+> **【宪法第三条】一切可观测，没有 Trace 不上线。** Agent 最危险的失败是"静默成功"：日志全是 200，结果却是错的。每步行动是否符合预期才是监控对象。任务级 / 步骤级 / 工具调用级三层 Trace，全局 trace_id 贯穿，操作方法见配套 OTel 文档。
 
-### V. Generalization over Specialization
+> **【宪法第四条】先归因，再优化，单变量验证。** 效果差先定位环节（Prompt / 检索 / 工具 / 策略 / 模型），一次只改一个变量，全维度回归不退化；每次失败样本回灌评测集。禁止"感觉差不多就全量"。
 
-New fields and methods MUST live at the most general level of the class
-hierarchy, not narrowed to a subclass referenced by a single issue. Retry logic
-MUST use the `tenacity` library; hand-written retry loops are prohibited.
+> **【宪法第五条】Agent 是 IO 密集型后端服务。** 所有外部调用（LLM、向量库、工具 API）必须有超时；所有重试路径必须幂等；所有缓存必须设 TTL；核心链路要短，非核心一律异步。
 
-*Rationale*: prevents one-off fixes from fragmenting the design and duplicating
-plumbing.
+---
 
-## Engineering Standards
+## 第二章 架构宪法
 
-- Imports go at the top of the file; no function-level imports.
-- Type annotations are required (mypy enforced).
-- Do NOT run pre-commit / ruff / mypy unless the user explicitly asks.
-- Keep changes minimal and matched to the surrounding code style.
+### 2.1 标准五层 + 两翼
 
-## Git Workflow
+```text
+用户层（CLI / Chat / API 入口，无业务逻辑）
+   ↓
+[输入 Guardrail] → LLM Orchestrator（意图理解 · 决策 · 生成） → [输出 Guardrail]
+   ↓                    ↑
+Planning（任务分解）   Memory（短期窗口 / 长期向量库）
+   ↓
+Tool Manager（注册 · Schema 校验 · 权限绑定）
+   ↓
+Execution Engine（重试 · 超时 · 幂等 · 回滚 · 沙箱）   [结果校验]
+   ↓
+外部 API / 数据库 / 代码沙箱
+```
 
-- Commit with `git commit -s --no-verify` (sign-off + skip local pre-commit).
-- Only create new commits; never amend.
-- Only merge; never rebase.
-- Only push; never force push.
-- Keep the full commit history intact for rollback.
+| 模块 | 职责 | 核心技术 |
+|---|---|---|
+| LLM | 意图理解、推理、生成 | Prompt 工程、Few-shot、Function Calling |
+| Planning | 任务分解、推理链 | ReAct、CoT、Plan-and-Execute |
+| Memory | 上下文存储与检索 | 短期滑动窗口 / 长期向量库 / Entity Memory |
+| Tool | 注册、参数构造、分发 | OpenAPI Schema、Tool Registry、JSON Schema 校验 |
+| Execution | 实际执行与异常处理 | 沙箱、重试、幂等控制 |
 
-## Governance
+> **【法条 2.1】分层解耦，核心不感知细节。** 入口层无业务逻辑；Agent Core 只做编排；LLM 走统一 `LLMBackend` 抽象（换模型不动核心）；工具统一继承 `BaseTool` 插件注册（加工具不改核心）；Prompt 不硬编码在主循环。新增工具 / 模型 / 入口的改动范围必须限定在单层内。
 
-This constitution supersedes all other development practices. Amendments require
-documentation of the change, approval, and a migration plan when behavior
-changes. Version bumps follow semantic versioning: MAJOR for backward
-incompatible principle removals or redefinitions, MINOR for new principles or
-sections, PATCH for clarifications and wording. All PRs and reviews MUST verify
-compliance with this constitution. Use `CLAUDE.md` as the runtime development
-guidance file.
+> **【法条 2.2】模块间通信只用标准化消息对象。** `role / content / tool_calls / tool_results`，即 OpenAI Function Calling 协议形态。每次进入 LLM 前做一次消息裁剪。复杂多 Agent 场景引入消息总线（Redis / Kafka）异步解耦。
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-02 | **Last Amended**: 2026-09-02
+> **【法条 2.3】Agentic Loop 必须有最大步数熔断。** 默认上限 20 步（Coding Agent 可放宽至 40），超出强制终止并返回部分结果。无终止条件的 Loop 不允许合并。
+
+### 2.2 可控性四象限
+
+| 维度 | 要求 |
+|---|---|
+| 输出可校验 | 所有程序消费的输出走 Schema 校验（见 5.4） |
+| 高风险可拦截 | 写操作、外部副作用前有确认或硬规则（见第十一章） |
+| 异常可降级 | 工具不可用时备用方案 / 规则引擎兜底 / 部分结果返回 |
+| 链路可 Trace | trace_id 全链路贯穿（见第十三章） |
+
+---
+
+## 第三章 推理与规划宪法
+
+### 3.1 推理框架选型
+
+| 框架 | 适用 | 不适用 / 代价 |
+|---|---|---|
+| Zero-shot CoT | 快速实验 | 推理风格不可控 |
+| Few-shot CoT | 对推理质量有要求的任务 | 实现成本高 |
+| ReAct（Thought-Action-Observation） | 需要工具调用的开放式任务 | 每轮循环至少多一次 LLM 调用，延迟敏感场景先评估 |
+| Plan-and-Execute | 复杂长任务 | 计划僵化风险，需要重规划机制 |
+| Self-Consistency（采样 3-5 次投票） | 高风险决策 | token 成本 ×N，仅关键场景 |
+
+> **【法条 3.1】答案不依赖中间推理的任务（简单分类、格式转换、模板填充），禁止上 CoT/ReAct**——是纯粹的 token 浪费，且模型可能"说服自己"走向错误答案。
+
+> **【法条 3.2】生产编排用"Workflow 定框架 + 局部 Agent 自主"的混合模式。** 确定性流程用显式图（如 LangGraph StateGraph），自主决策只留给真正需要的节点。反思（Reflection）最多 1-2 轮。
+
+> **【法条 3.3】Thought 必须留痕。** 每步 Thought 都是可审计的决策日志，是事后定位"哪步推理错了"的唯一依据。存储为结构化摘要（不存全文），进 Trace。
+
+> 💡 **补充：** 执行与评判分离（Evaluator 独立于 Generator）——自我评价系统性偏乐观，评测 Agent 必须与执行 Agent 分开。
+
+---
+
+## 第四章 单/多 Agent 裁决宪法
+
+### 4.1 单 Agent 三条红线
+
+> **【法条 4.1】触碰任意一条红线，必须评估 Multi-Agent，不许继续在单 Agent 上打补丁：**
+
+| 红线 | 阈值 | 原因 |
+|---|---|---|
+| 工具数量 | **> 15 个**（健康值 ≤10） | 注意力稀释，实测 10→30 个工具选择准确率下降约 15% |
+| 任务步数 | **> 20 步** | Context 膨胀，早期关键信息被边缘化 |
+| 天然并行结构 | 多个独立子任务 | 单 Agent 串行是硬性吞吐瓶颈 |
+
+### 4.2 拆分五条依据
+
+拆分必须满足以下至少 2-3 条，一条都不满足时拆分只增加通信复杂度：
+
+1. **工具集不重叠**（检索工具 vs 数据库写工具互不干扰注意力）
+2. **可并行执行**（总延迟从串行之和 → 最慢的一个）
+3. **独立迭代需求**（频繁改的不拖累稳定的）
+4. **权限边界隔离**（写操作只授权给专用 Agent，最小权限）
+5. **故障隔离**（一个子服务崩溃不拖垮整体）
+
+> **【法条 4.2】Orchestrator-Workers（分层模式）为默认拓扑**，覆盖约 80% 场景；子 Agent 必须有四要素：明确目标、输出格式、工具指引、任务边界。模型分工：贵模型做编排决策，便宜模型做执行（实测 Opus 编排 + Haiku 执行比单 Opus +12.2%）。
+
+### 4.3 多 Agent 失败链路五层防线
+
+| 层 | 要求 |
+|---|---|
+| 1. 故障分类 | 超时（熔断+重试）/ 错误结果（校验+降级）/ Orchestrator 崩溃（状态恢复）/ 消息丢失（确认+幂等重投），禁止一律 retry 一把梭 |
+| 2. 单 Worker 失败 | 先判是否关键路径：是→指数退避重试≤3 次→备用方案→上报降级；否→跳过，返回部分结果并标记缺失 |
+| 3. 阻断级联失败 | 每个 Agent 输出端加结果校验层（格式 / 置信度阈值 / 业务规则），错误不许流入下一个 Agent |
+| 4. 状态回滚 | 写操作前记 Checkpoint，失败跑补偿事务（Saga 模式），写操作全部带 Idempotency Key |
+| 5. 可观测 | 全局 trace_id 贯穿所有 Worker 日志（配套 OTel 文档方案 A 即为此设计） |
+
+---
+
+## 第五章 Prompt 宪法
+
+### 5.1 RTCFE 五层结构
+
+| 层 | 职责 | 位置 |
+|---|---|---|
+| Role | 激活知识域、定义能力边界（要具体，不要泛化） | System Prompt 最前 |
+| Task | 正向描述要做什么 | System Prompt 核心 |
+| Context | 业务背景，动态注入、按需裁剪 | 中部 |
+| Format | 输出结构约束，越具体越稳定 | System Prompt 末尾 |
+| Examples | 覆盖典型 + 边界用例 | Few-shot 示例块 |
+
+### 5.2 模块化与版本管理
+
+```text
+BaseModule     ← 角色 + 全局安全约束（每次不变）
+TaskModule     ← 当前任务描述（按场景切换）
+ToolModule     ← 工具 Schema（按可用工具动态生成）
+ContextModule  ← Memory 召回 + 业务数据（运行时注入）
+FormatModule   ← 输出格式规范（按下游需求切换）
+```
+
+> **【法条 5.1】Prompt 是代码。** Git 管理、语义版本号、每次变更写 changelog、与代码版本绑定发布。**禁止在生产环境直接改 Prompt。** A/B 测试时只切换一个模块，保证单变量实验。
+
+> **【法条 5.2】三条写作铁律：** ① 用正向描述（"三句话以内"），不用负向描述（"不要太长"）；② 角色定义具体化；③ 关键约束放首尾（U 型注意力），不可违反的规则放 System Prompt 开头，核心任务放 User Message 结尾。
+
+> **【法条 5.3】Prompt 不是越长越好。** 无关信息稀释注意力。精准的 200 token 优于臃肿的 2000 token。稳定前缀放最前以命中 Prompt Caching（成本可降约 90%）。
+
+### 5.3 结构化输出约束分层
+
+| 层级 | 保证 | 适用 |
+|---|---|---|
+| Prompt 约束 | 无保证 | 仅人读输出 |
+| JSON Mode | 语法合法 | 宽松场景 |
+| Schema 校验（json_schema / Structured Outputs） | 结构合法 | **程序消费链路最低标准** |
+| Grammar / 约束解码 | 解码层保证 | 强合规场景 |
+
+> **【法条 5.4】校验失败走分层 Fallback：** 轻量修复 → 带错误上下文定向重试 → 换强约束模式 → 降级人工，不许直接抛错给用户。截断问题先判定原因（max_tokens）再处理，不当格式错误。
+
+### 5.4 评估体系（防"假进步"）
+
+- **Golden Dataset**：≥100 条（可信需 500 例规模），覆盖典型 80% / 边界 / 对抗用例，必须包含线上真实失败案例。
+- **双层指标**：技术指标（格式合规率、字段覆盖率、P95 延迟、token 消耗）+ 业务指标（任务完成率、事实准确率、有害率，用 LLM-as-Judge + Rubric + 人工复核）。
+- **A/B**：按用户 ID 哈希分流，p<0.05 才显著。
+
+> **【法条 5.5】全维度回归：新版本在所有指标上不得低于基准，包括非目标指标。** 经典事故：格式合规率 80%→95%，任务完成率 90%→75%，只看目标指标就全量推送 = 用户投诉翻倍。
+
+---
+
+## 第六章 上下文宪法
+
+```text
+TokenBudget 分配模板（以 80k 窗口为例）
+system prompt    10%   永不裁剪
+repo / 知识地图   15%   结构化摘要，逐级降级
+history         50%   从最旧丢弃；首条任务描述永不丢
+当前 observation 25%   超长输出头尾保留截断（错误信息通常在末尾）
+输出预留         15%   （部分项可复用重叠额度）
+```
+
+> **【法条 6.1】上下文必须有预算管理器。** 每次注入 LLM 前计算 token（tiktoken 优先，字符÷4 兜底，误差 <15%），超预算按优先级裁剪。禁止把工具原始输出整段塞进 context——必须截断。
+
+> **【法条 6.2】对抗 Lost in the Middle：关键信息放首尾，次重要放中间。** 检索文档同理：最相关的放 Context 头部和尾部（实测可提升回答准确率约 8%）。
+
+> **【法条 6.3】长任务优先 Context Reset（清空 + 结构化交接文件），其次才是就地压缩 compaction。** 代码库类 Agent 用"目录地图代替背全书"（符号级摘要 ~8000 token 注入），并逐级降级（tree-sitter → 正则 → 文件名），降级不阻断。
+
+> 💡 **补充经验：** session 开始先读 git log / 进度文件 / 任务清单再动手，防止"看到已有进展就提前宣布完成"和"context 焦虑"两大长程任务失败模式。
+
+---
+
+## 第七章 记忆宪法
+
+### 7.1 三层记忆与检索
+
+| 层 | 载体 | 说明 |
+|---|---|---|
+| 工作记忆 | 当前 context window | 受 TokenBudget 管理 |
+| 短期记忆 | 会话历史（Redis / DB） | thread_id / session_id 索引 |
+| 长期记忆 | 向量库 + 结构化条目 | 混合检索（向量 + BM25 + 时间衰减），注入 3-5 条、相似度阈值 0.75、单条 50-100 token |
+
+> 💡 **补充：** 存储不必迷信向量库——纯文件 + 检索式方案在 LoCoMo 长对话基准上可达 74%，胜过部分专用记忆库；context editing + memory tool 在百轮对话中可降 84% token。按场景选型：客服重情节记忆、推荐重语义、编程助手重程序记忆（Agent 自改 system prompt 的规则）。
+
+### 7.2 更新策略（先判关系，再选写入）
+
+```text
+新信息 → 向量检索相似记忆（阈值 ~0.85）
+  ├─ 无相似        → 追加写入
+  ├─ 语义冲突      → 覆盖写入（旧值存 history 版本历史，不物理删除）
+  ├─ 语义互补      → 追加写入 + related_ids 关联
+  └─ 高度重复(≥.95)→ 合并压缩，不新增条目
+  疑似过时不确认   → 软标记 is_deprecated，检索降权
+```
+
+| 记忆类型 | 默认策略 |
+|---|---|
+| 身份事实（姓名/城市/过敏） | 覆盖写入 |
+| 用户偏好 | 追加 + 权重衰减 |
+| 对话摘要 | 追加（时序价值） |
+| 知识性内容 | 合并压缩（防碎片化） |
+
+### 7.3 总结触发：三层组合
+
+1. **实时层（毫秒）**：规则引擎（正则匹配"我喜欢 / 请记住"等句式 <1ms）+ 轻量 LLM 异步评分（0-1 重要性分 + 类型 + 提炼内容 + 置信度），**异步执行不阻塞主流程**；
+2. **Session 层（分钟）**：会话结束异步完整总结，质量最高；
+3. **离线层（小时）**：定时批处理做跨 session 合并去重。
+
+> **【法条 7.1】Token 阈值压缩：** 对话历史占窗口 >70% 时，对最早 N 轮异步生成摘要替换，首条任务描述永不丢。评分 0.4-0.7 的模糊条目进待确认队列；医疗 / 金融 / 法律场景加人工审核兜底。
+
+### 7.4 淘汰策略
+
+> **【法条 7.2】禁止用 FIFO 单独淘汰长期记忆。** 反例：三年前的花生过敏史会被"太旧"淘汰。用多维混合评分：`0.40×重要性 + 0.25×最近访问 + 0.20×访问频率 + 0.15×对数时间衰减`，按分区差异化：核心事实区（重要性 >0.8）永不淘汰；临时信息区 TTL 24h；摘要区 LRU+衰减 90 天；知识区 LFU+重要性。
+
+---
+
+## 第八章 RAG 宪法
+
+### 8.1 离线流程决定天花板
+
+| 环节 | 规则 |
+|---|---|
+| 切片 | 固定长度（overlap 10-20%）/ 语义切片 / 结构感知 / **父子切片（生产首选：小块 128-256 召回，大块 512-1024 供上下文）**；通用文档 256-512 token，代码按函数边界，QA 一条一切 |
+| Embedding | RAG 是非对称场景，选 QA 训练的模型（中文 bge 系列，英文 text-embedding-3）；入库前 L2 归一化（余弦→点积，提速 30%+）；MRL 模型可动态截断维度权衡精度成本 |
+| 索引 | HNSW（延迟敏感、数千万内、recall@10 99%+）/ IVF（数亿级、内存敏感）；metadata filter：过滤比例 <50% 用 post-filter（超采样 ×5 补偿），>80% 用 pre-filter 或分离索引 |
+
+### 8.2 在线流程四步
+
+1. **Query 处理**：Rewrite（延迟敏感通用）/ Expansion（召回率敏感）/ HyDE（假想文档检索，质量最好但多一次 LLM 调用）；
+2. **混合召回**：向量 + BM25 并行，RRF 融合（score=Σ1/(60+rank)，不依赖量纲）；实测 Recall@20 从 72%→85%。候选保留 20-50 个；
+3. **Rerank**：Cross-encoder 精排（单点收益最大的优化），分数低于阈值（~0.3）直接过滤，同时去重；
+4. **Context 组装**：**3-5 个文档最优，超过 7 个触发 Lost in the Middle**；最相关放头尾；截断优先保留前半；带来源标注（文件名/页码）。
+
+### 8.3 生成与评测
+
+> **【法条 8.1】生成 Prompt 四条必备约束：** ① 只基于提供的资料回答，禁用训练知识；② 资料不足时明确说"无法回答"，不许猜测；③ 引用来源编号；④ 指定回答格式与语气。流式输出用 SSE，优化 TTFT 而非总时长。
+
+> **【法条 8.2】RAG 评测必须分开测 Faithfulness（忠实度，是否完全基于 Context）与 Relevance（相关性）。** 流畅但改了数字的回答是 Faithfulness 低 Relevance 高，只看一个维度必误判。技术维度看 Recall@k / MRR / citation accuracy。
+
+> **【法条 8.3】效果差先归因离线还是在线：** 相关文档在库里但没召回 = 在线问题；库里根本没有或语义被切断 = 离线问题。两类优化方向完全不同。
+
+---
+
+## 第九章 工具与 MCP 宪法
+
+### 9.1 工具设计
+
+> **【法条 9.1】统一接口：`execute(params) → ToolResult`，每个工具提供 JSON Schema。描述必须写清"何时用 / 何时不用"。** 工具失败不抛异常、返回 error ToolResult 让 LLM 自行调整——工具失败 ≠ 任务失败。区分"空结果"与"执行失败"两种语义。
+
+> **【法条 9.2】工具元数据静态声明 retryable / compensatable / non_retryable_errors**，重试策略由引擎按声明执行，不写死在调用处。
+
+### 9.2 MCP 使用
+
+| 要点 | 内容 |
+|---|---|
+| 三类能力 | Tools（有副作用操作）/ Resources（只读上下文）/ Prompts（服务端模板） |
+| 与 Function Call 关系 | 层叠非竞争：FC 解决"LLM 如何表达调用意图"，MCP 解决"工具如何标准化暴露、发现、复用"（tools/list 动态发现、独立进程执行、跨 Host 复用） |
+| 初始化 | initialize 握手 → tools/list 拉取 Schema 本地缓存 → tools/call (JSON-RPC 2.0) |
+| 流式 | Transport 层：stdio（本地）/ HTTP+SSE（远程、原生流式）；工具执行中用 notifications/message 推进度，最终结果仍为完整 CallToolResult |
+
+> **【法条 9.3】不无条件信任第三方 MCP Server。** 协议无内置认证标准，恶意 Server 可读文件、访问网络、在工具描述里注入 Prompt Injection。生产使用：版本锁定、来源审计、权限最小化、工具描述过滤。
+
+> 💡 **补充：** 程序性知识（"怎么做"）用 Skill / 指令文档封装（渐进式披露：常驻仅 name+description，按需加载正文）；事实性知识（"是什么"）用 RAG。二者组合优于任一单用。
+
+---
+
+## 第十章 执行与可靠性宪法
+
+### 10.1 五道稳定性防线
+
+| 防线 | 规则 |
+|---|---|
+| 防失败 | 所有工具调用：超时（硬超时）+ 指数退避重试（初始 2s 翻倍，≤3 次，加 jitter）+ 熔断；401/403/400 等确定性错误不重试 |
+| 防副作用 | 写操作幂等：Idempotency Key = hash(task_id + step + params)，任务开始即落盘、重试复用 |
+| 防卡死 | Loop 步数熔断（≤20/40）+ 死循环检测（连续 3 步 tool+params 完全相同 → GIVE_UP）+ 软干预（连续 6 步无实质进展 → 注入反思 prompt 重规划） |
+| 防丢失 | 事件溯源：append-only JSONL（action/observation/reflection），写后立即 flush，支持确定性 replay 断点续跑；文件名 {task_id}_{timestamp} 不覆盖 |
+| 可恢复 | 长任务（>30s）Checkpoint 持久化（LangGraph checkpointer），失败从断点续跑；副作用边界前后打 Checkpoint 点 |
+
+### 10.2 失败分类与补偿
+
+```text
+失败分类处理：
+瞬时失败(超时/限流)  → 指数退避重试
+确定性失败(参数错)   → 不重试，回报 LLM 重新规划
+部分失败            → 幂等键 + 先探测再重试（三层防重：请求侧幂等键 → 探测 → 外部唯一约束兜底）
+补偿失败            → 死信队列转人工（积压量是核心告警指标）
+有副作用已执行       → 补偿事务回滚（Saga）
+```
+
+> **【法条 10.1】不支持的模型做 Fallback 而不是拒绝：** 无 Function Calling 的推理模型走"system prompt 注入工具描述 + 结构化文本解析"降级路径。
+
+---
+
+## 第十一章 安全宪法
+
+### 11.1 三道 Guardrail
+
+| 位置 | 校验内容 | 目的 |
+|---|---|---|
+| 输入侧 | 违禁词、Prompt Injection、内容合规 | 防恶意操控 LLM |
+| 输出侧 | JSON Schema 校验、幻觉检测、敏感信息过滤，失败走 Fallback | 防错误传播到执行层 |
+| 结果侧 | 工具返回值范围、状态码、副作用确认 | 防脏数据污染下一轮推理 |
+
+### 11.2 执行安全四层
+
+```text
+① 硬拦截黑名单（rm -rf / 等毁灭性命令，永不执行）
+② 只读白名单 → 直接执行
+③ 写操作 → 用户确认（注意：白名单命令带 > 重定向也须确认）
+④ Docker 沙箱（--network none 断网、bind mount 同步、懒启动、session 结束清理）
+```
+
+> **【法条 11.1】外部内容一律当数据，不当指令。** 检索到的文档、工具返回、网页内容都可能含注入指令。权限在架构层不给（只读 + RBAC），不能靠 Prompt 约束。
+
+> **【法条 11.2】高风险写操作四段式：读 → 草稿 → 确认 → 执行。** HITL 触发评分 = 不可逆性 × 影响范围 × 置信度，超阈值插确认节点（LangGraph interrupt / Command 机制）；Gate 设计为异步屏障 + 状态机 + TTL 超时策略，不阻塞并行子图。
+
+> **【法条 11.3】多租户隔离在架构层强制，不靠应用层"小心"：** 所有存储检索带 tenant_id（向量库 metadata filter、缓存 key 前缀、日志标签）；工具注册绑定权限策略，调用前鉴权；独立 System Prompt / 模型参数 / 工具白名单；按租户 Token 配额限流。会话上下文按 user_id + session_id 组合索引。
+
+---
+
+## 第十二章 后端服务宪法
+
+### 12.1 IO 模型与并发
+
+> **【法条 12.1】Agent 服务按 IO 密集型设计：协程 / 事件驱动，不同业务独立线程池隔离**（防止慢工具拖垮全部会话）；线程池参数显式指定（core/max/queue/拒绝策略），禁用无界队列；拒绝策略带日志监控，CallerRuns 提供反压；锁必须带超时，持锁期间禁止网络 IO。
+
+### 12.2 流式与连接
+
+> **【法条 12.2】LLM 输出用 SSE/WebSocket 流式（优化 TTFT）；连接池化复用 + 心跳保活；所有路径（含异常路径）归还连接；对 LLM API / 向量库设读写超时与最大空闲时间。** 流式场景"流式展示、非流式提交"——展示逐 token，提交用校验后的完整结果。
+
+### 12.3 异步长任务
+
+```text
+深度研究 / 批处理任务：MQ 异步 + 任务状态机 + 幂等消费
+可靠性：acks=all → broker 3 副本 → 消费端"先处理后提交 offset"
+at-least-once ⇒ 消费端幂等（唯一索引 / SETNX / 状态机条件更新）
+相同 Key 同分区保序；重试超限进死信队列 + 告警
+```
+
+### 12.4 缓存与存储
+
+- Cache Aside：读缓存→miss 回源回填；写"先更库再删缓存"+ TTL + 延迟双删；DB 是事实源，缓存是派生数据；
+- 防穿透（空值缓存/布隆）、防击穿（互斥重建）、防雪崩（TTL 加随机）；
+- 慢 SQL 用 EXPLAIN；深分页用游标；单表 ~500 万行分库分表；
+- 短事务、条件原子更新防并发超卖；跨服务最终一致（本地消息表）。
+
+### 12.5 限流与容量
+
+> **【法条 12.3】限流按业务维度设计（接口 / 用户 / 租户 / 下游 LLM 配额），令牌桶算法，Redis+Lua 原子实现，限流系统自身可降级（本地限流兜底）；被限流可选排队 / 降级（缓存结果 / 简化回答），不是一律报错。** 容量按 Little's Law 估算，生产水位取压测极限的 60-70%。CPU 不高但 RT 高 = 在等下游（LLM 慢的典型特征），先查超时与连接池。
+
+---
+
+## 第十三章 可观测与评测宪法
+
+### 13.1 Trace 三层
+
+| 层级 | 记录 |
+|---|---|
+| 任务级 | trace_id、目标、最终状态、总成本、token |
+| 步骤级 | Thought 结构化摘要、计划变更（plan drift）、step_type / status / latency / confidence |
+| 工具调用级 | 参数、返回、重试次数（Tool Call span）；多 Agent 另加 Handoff span（交接状态） |
+
+> **【法条 13.1】用 OpenTelemetry GenAI 语义约定（gen_ai.* / traceloop.span.kind）作为 span 属性标准，厂商中立。** 具体接入方式（OpenLLMetry 自动埋点 / OpenInference / LangSmith / 手动）按配套《OTel + LangGraph 使用操作文档》第 3 章选型执行；多 Agent 全局 trace_id 传播是失败定位的前提。
+
+### 13.2 Eval 三层并行
+
+| 层 | 内容 |
+|---|---|
+| 结果评估 | 快速过滤：任务完成率、格式合规率（注意：被打"完全成功"的运行中 83% 含程序性违规，单看它会漏判） |
+| 轨迹评估 | 工具选择、参数格式、步骤顺序、重复检测（多 Agent 失败中步骤重复占 17%、推理-行动不匹配占 14%，只能靠轨迹评估发现）；可为核心任务定义"期望轨迹" |
+| 元评估 | 校准 LLM-as-Judge 的位置偏见、长度偏见、版本漂移 |
+
+> **【法条 13.2】失败闭环：线上失败 trace 一键转回归用例；同一套 Scorer 同时跑 CI 与生产，评分不达标阻止合并（CI 门控）。** 成本按 task_id 聚合，看"单位成功成本"而非平均成本。
+
+### 13.3 测试
+
+- Mock LLMBackend 按脚本返回预设 Action，单元测试零真实 API 调用；
+- pytest tmp_path 隔离文件系统；Docker 集成测试按可用性跳过；
+- LangGraph 节点可单独调用（`graph.nodes["x"].invoke`）、可用 update_state + interrupt 做局部路径测试。
+
+---
+
+## 第十四章 发布与变更宪法
+
+> **【法条 14.1】上线三步走：Shadow Testing（副作用 mock/dry-run，只记录不生效）→ 小流量灰度（A/B 按用户哈希分流，p<0.05）→ 全维度回归通过后全量。** Prompt / 模型 / 检索策略变更同此流程。
+
+> **【法条 14.2】一切变更可回滚：** Prompt 版本化、模型可切回、检索索引双版本、Checkpointer 数据保留。上线后监控单位成功成本 + 任务完成率 + 投诉代理指标，异常即回滚。
+
+> **【法条 14.3】Agent 持续学习先经验化（规则库 / 案例库 / Skill），再考虑参数化（微调）；** 任何自我写入（记忆 / 规则）必须受控、可版本化、可回滚。
+
+---
+
+## 附录 A：红线数字速查表
+
+| 指标 | 阈值 | 出处章节 |
+|---|---|---|
+| 单 Agent 工具数 | ≤10 健康，>15 必须评估拆分 | 第四章 |
+| Agent Loop 最大步数 | 20 步（Coding 类 40） | 第二章 |
+| 死循环检测 | 连续 3 步相同调用 → 终止 | 第十章 |
+| 重试 | 指数退避 ≤3 次，确定性错误不重试 | 第十章 |
+| 工具重试次数上限 / 备用接管 | 3 次后降级或上报 | 第四章 |
+| 反思轮数 | ≤2 轮 | 第三章 |
+| 对话历史压缩触发 | 窗口占用 >70% | 第六/七章 |
+| 记忆检索注入 | 3-5 条，相似度 ≥0.75，单条 50-100 token | 第七章 |
+| 记忆写入冲突检测阈值 | 相似度 0.85（判关系）/ 0.95（合并） | 第七章 |
+| LLM 评分写入分界 | >0.7 写入；0.4-0.7 待确认；<0.4 丢弃 | 第七章 |
+| chunk size | 通用 256-512，技术 512-1024，overlap 10-20% | 第八章 |
+| 混合召回候选数 | 20-50 个进 Rerank | 第八章 |
+| 最终 Context 文档数 | 3-5 个，≤7 | 第八章 |
+| Rerank 过滤阈值 | 相关性分 <0.3 丢弃 | 第八章 |
+| 元数据过滤策略切换 | 过滤 <50% post-filter（超采样×5），>80% pre-filter | 第八章 |
+| Golden Dataset | ≥100 条起步，500 条可信 | 第五章 |
+| A/B 显著性 | p<0.05 + 全维度回归 | 第五章 |
+| 生产容量水位 | 压测极限的 60-70% | 第十二章 |
+| 单 Checkpoint 体积 | ≤50KB，超出挪对象存储 | 配套文档 |
+
+---
+
+## 附录 B：开工 / 上线检查清单
+
+### B1 开工前（架构评审）
+
+- [ ] 五层架构图 + Guardrail 位置已画出；入口层无业务逻辑
+- [ ] 单/多 Agent 决策已按第四章四维 + 五依据走完，结论有记录
+- [ ] 每个 Agent 工具数 ≤10，Loop 有步数熔断
+- [ ] TokenBudget 分配表已定义；工具输出截断策略已定
+- [ ] LLMBackend / BaseTool 抽象就位，加工具加模型不动核心
+- [ ] Prompt 已模块化 + Git 版本化，评估集（含失败案例）已建
+- [ ] 写操作幂等键设计 + Checkpoint 方案（checkpointer 选型）已定
+- [ ] OTel 接入方案已定（配套文档方案 A/B/C/D 选一），trace_id 规划完毕
+- [ ] 多租户隔离方案（tenant_id 贯穿存储/检索/日志）已定
+
+### B2 上线前（发布门禁）
+
+- [ ] 三道 Guardrail 全部启用且有测试用例（含对抗用例）
+- [ ] 高风险操作有人工确认节点，Gate 有 TTL
+- [ ] 所有外部调用带超时；重试 + 熔断 + 降级路径演练过
+- [ ] 死循环检测 + 反思软干预生效
+- [ ] Shadow Testing 通过；灰度 A/B 显著且全维度回归不退化
+- [ ] Trace 在 Jaeger/后端可见：LLM token、工具入出参、多 Agent handoff
+- [ ] 监控告警就位：任务完成率、P95 延迟、单位成功成本、死信队列积压
+- [ ] 回滚方案演练：Prompt 回退、模型切换、索引双版本
+- [ ] 限流（租户/用户/LLM 配额维度）与本地兜底就位
+
+---
+
+*来源：用户提供的十份资料（面经梳理第一至六期、技术分享、项目面试、Agent 面试知识库 PRO、后端八股）+ 补充的 OTel/GenAI 语义约定、LangGraph 实践、OpenLLMetry/OpenInference 生态与结构化输出分层等公开最佳实践。与《OpenTelemetry + LangGraph 使用操作文档》配套使用。*
