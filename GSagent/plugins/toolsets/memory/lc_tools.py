@@ -1,17 +1,19 @@
 """memory 工具集（langchain @tool 版，纯 langgraph 重构）。
 
-remember / search_memory 迁移为 ``@tool``，复用 ``StoreMemoryAdapter`` over langgraph
-BaseStore（SqliteStore 持久化）执行内核。配置（db_path/scope/user/max_entries）
-经工厂闭包注入，不暴露为工具参数。
-无守卫（工具名不在 PATH/COMMAND_TOOLS）；免批（approval_required_tools 为空）。
+remember / search_memory 用 langgraph ``InjectedStore`` 原生注入：store 由图编译
+时 ``compile(store=...)`` 提供（graph context 自动注入），不再经工厂闭包持有——
+工具与存储解耦，任何 compile(store) 的图（单 Agent/多 Agent/Plan/serve）都可用。
+配置（scope/user/max_entries）仍经工厂闭包注入（非运行时用户输入）。
+无守卫（工具名不在 PATH/COMMAND_TOOLS）；免批。
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedStore
+from langgraph.store.base import BaseStore
 
 from GSagent.core.memory.langgraph_store import StoreMemoryAdapter
-from GSagent.core.memory.saver import create_store
 from GSagent.core.memory.store import DEFAULT_MEMORY_DB, resolve_scope
 from GSagent.core.memory.user import resolve_user_key
 
@@ -36,32 +38,40 @@ def _load_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def create_memory_tools(config: Optional[Dict[str, Any]] = None) -> List[Any]:
-    """工厂：返回 memory @tool 列表（StoreMemoryAdapter 闭包注入，SqliteStore 持久化）。"""
+    """工厂：返回 memory @tool 列表（store 经 ``InjectedStore`` 图注入）。"""
     cfg = _load_config(config)
-    store = StoreMemoryAdapter(
-        create_store(cfg["db_path"]), max_entries=cfg["max_entries"]
-    )
     scope_default = cfg["scope"]
     user = cfg["user"]
+    max_entries = cfg["max_entries"]
 
     @tool
-    def remember(content: str, kind: str = "fact", scope: str = "") -> str:
+    def remember(
+        content: str,
+        kind: str = "fact",
+        scope: str = "",
+        store: Annotated[BaseStore, InjectedStore] = None,
+    ) -> str:
         """Store a long-term memory for the current project scope (cross-session)."""
         if kind not in VALID_KINDS:
             raise ValueError(f"kind must be one of {VALID_KINDS}")
         eff_scope = scope.strip() or scope_default
-        store.remember(
+        StoreMemoryAdapter(store, max_entries=max_entries).remember(
             scope=eff_scope, content=content, kind=kind, source="agent", user=user
         )
         return f"remembered ({kind}) in scope '{eff_scope}'"
 
     @tool
-    def search_memory(query: str, limit: int = 5, kinds: Optional[str] = None) -> str:
+    def search_memory(
+        query: str,
+        limit: int = 5,
+        kinds: Optional[str] = None,
+        store: Annotated[BaseStore, InjectedStore] = None,
+    ) -> str:
         """Search long-term memory for the current project scope by keywords."""
         kinds_list = None
         if kinds:
             kinds_list = [k.strip() for k in kinds.split(",") if k.strip()]
-        results = store.search(
+        results = StoreMemoryAdapter(store).search(
             scope=scope_default, query=query, limit=limit, kinds=kinds_list, user=user
         )
         return str(results)

@@ -6,6 +6,8 @@
 
 from langchain_core.messages import AIMessage
 
+from langgraph.store.memory import InMemoryStore
+
 from GSagent.core.agents.graph_agent import GraphAgent
 from GSagent.core.policy.path_guard import PathGuard
 from GSagent.core.tools.registry import ToolRegistry
@@ -67,11 +69,9 @@ class TestLcToolsFlow:
         assert tool_msgs and "hello world" in tool_msgs[0]["content"]
 
     def test_memory_remember_via_orchestration(self, tmp_path):
-        """remember 经编排执行（无守卫，走 MemoryStore）。"""
+        """remember 经编排执行（InjectedStore 注入，图 compile(store)）。"""
         reg = ToolRegistry()
-        for t in create_memory_tools(
-            {"db_path": str(tmp_path / "mem.db"), "scope": str(tmp_path)}
-        ):
+        for t in create_memory_tools({"scope": str(tmp_path)}):
             reg.register(t)
 
         llm = FakeChatLLM(
@@ -92,7 +92,11 @@ class TestLcToolsFlow:
             ]
         )
         agent = GraphAgent(
-            chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False
+            chat_model=llm,
+            tools_registry=reg,
+            max_steps=5,
+            enable_compaction=False,
+            store=InMemoryStore(),
         )
         events = [
             e

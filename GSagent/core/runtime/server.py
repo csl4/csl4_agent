@@ -112,7 +112,9 @@ def create_app(
         config = config or Config()
         # serve 默认 never：服务无人类审批界面（FR-004）。
         config.data.setdefault("policy", {})["hitl_mode"] = hitl_mode
-        agent = config.create_single_graph_agent(checkpointer=config.create_saver())
+        agent = config.create_single_graph_agent(
+            checkpointer=config.create_saver(), store=config.create_store()
+        )
 
     if task_manager is None:
         config = config or Config()

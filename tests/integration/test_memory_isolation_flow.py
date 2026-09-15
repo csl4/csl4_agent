@@ -33,19 +33,20 @@ class TestLongTermMemoryEndToEnd:
         assert store_a.forget_scope(SCOPE, user="alice") == 1
         assert len(store_b.list(SCOPE, user="bob")) == 1
 
-    def test_tool_and_store_isolation_consistent(self, tmp_path):
-        """工具 remember/search 与底层 store 隔离一致（SC-005）。"""
-        db = str(tmp_path / "shared.db")
-        tools_a = create_memory_tools({"db_path": db, "user": "alice", "scope": SCOPE})
-        tools_b = create_memory_tools({"db_path": db, "user": "bob", "scope": SCOPE})
+    def test_tool_and_store_isolation_consistent(self):
+        """工具 remember/search 与底层 store 隔离一致（SC-005，InjectedStore 注入）。"""
+        from langgraph.store.memory import InMemoryStore
 
-        tools_a[0].invoke({"content": "工具记忆 A"})
-        tools_b[0].invoke({"content": "工具记忆 B"})
+        store = InMemoryStore()
+        tools_a = create_memory_tools({"user": "alice", "scope": SCOPE})
+        tools_b = create_memory_tools({"user": "bob", "scope": SCOPE})
 
-        # 经底层 store 直接查询也应隔离（工具视角与存储视角一致）
-        store = _adapter(db)
-        assert len(store.search(SCOPE, "工具记忆", user="alice")) == 1
-        assert len(store.search(SCOPE, "工具记忆", user="bob")) == 1
+        tools_a[0].invoke({"content": "工具记忆 A", "store": store})
+        tools_b[0].invoke({"content": "工具记忆 B", "store": store})
+
+        # 经同一 store 直接查询也应隔离（工具视角与存储视角一致）
+        assert len(StoreMemoryAdapter(store).search(SCOPE, "工具记忆", user="alice")) == 1
+        assert len(StoreMemoryAdapter(store).search(SCOPE, "工具记忆", user="bob")) == 1
 
 
 class TestSessionMemoryEndToEnd:

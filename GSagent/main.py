@@ -126,7 +126,9 @@ def _create_agent(config: Config):
     try:
         registry = config.create_tools_registry()
         agent = config.create_single_graph_agent(
-            tools_registry=registry, checkpointer=config.create_saver()
+            tools_registry=registry,
+            checkpointer=config.create_saver(),
+            store=config.create_store(),
         )
         return agent, registry
     except RuntimeError as exc:
@@ -147,7 +149,9 @@ def _create_multi_agent(
         raise typer.BadParameter("--max-subagents 必须是正整数。")
     try:
         return config.create_multi_graph_agent(
-            max_subagents=max_subagents, checkpointer=config.create_saver()
+            max_subagents=max_subagents,
+            checkpointer=config.create_saver(),
+            store=config.create_store(),
         )
     except RuntimeError as exc:
         print_error(str(exc))
@@ -876,7 +880,9 @@ def chat(
                 "plan 模式接管：--multi-agent/配置拆解被忽略，改用确定性 DAG 规划。\n"
             )
         plan_agent = config.create_plan_graph_agent(
-            checkpointer=config.create_saver(), max_subagents=max_subagents
+            checkpointer=config.create_saver(),
+            store=config.create_store(),
+            max_subagents=max_subagents,
         )
         print_banner(
             model=config.data["llm"]["model"],
