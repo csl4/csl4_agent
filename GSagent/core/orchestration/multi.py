@@ -20,16 +20,13 @@ import re
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Send
 
 from GSagent.core.llm_adapter import messages_to_dict
-from GSagent.core.observability import AgentEventType
-from GSagent.core.orchestration.nodes import _emit, _msg
-from GSagent.core.orchestration.state import _append_list
-from GSagent.core.prompts import build_chat_messages
-from GSagent.utils.stream import StreamEvents
+from GSagent.utils.stream import StreamEvents, stream_custom
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +71,6 @@ class MultiGraphState(TypedDict, total=False):
     # decompose 输出子任务列表 [{kind, text}]
     subtasks: List[Dict[str, Any]]
     request_context: Optional[Dict[str, Any]]
-    # 事件缓冲（append reducer，前缀 _：编排内部）
-    _stream_messages: Annotated[List[Dict[str, Any]], _append_list]
 
 
 # ---- 拆解（纯函数，复用旧 Orchestrator 逻辑）----
@@ -131,6 +126,7 @@ def decompose_node_factory(
     """decompose 节点：拆解用户任务 → subtasks，产 MULTI_AGENT_DECOMPOSE 事件。"""
 
     def _decompose(state: Dict[str, Any]) -> Dict[str, Any]:
+        writer = get_stream_writer()
         messages: list[BaseMessage] = list(state.get("messages") or [])
         user_text = ""
         for m in reversed(messages):
@@ -146,12 +142,8 @@ def decompose_node_factory(
         # 空子任务 → 兜底一条业务子任务（finalize 直接处理）
         if not subtasks:
             subtasks = [{"kind": "business", "text": user_text or "(空任务)"}]
-        return {
-            "subtasks": subtasks,
-            "_stream_messages": [
-                _msg(StreamEvents.MULTI_AGENT_DECOMPOSE, {"task": user_text})
-            ],
-        }
+        stream_custom(writer, StreamEvents.MULTI_AGENT_DECOMPOSE, {"task": user_text})
+        return {"subtasks": subtasks}
 
     return _decompose
 
@@ -167,10 +159,11 @@ def dispatch(state: Dict[str, Any]) -> List[Send]:
     return sends
 
 
-def gather_node_factory(loop: Any) -> Any:
+def gather_node_factory() -> Any:
     """gather 节点：从 messages 收集各 worker 的 AI 结果，产子任务明细事件。"""
 
     def _gather(state: Dict[str, Any]) -> Dict[str, Any]:
+        writer = get_stream_writer()
         ai_results = [
             str(m.content)
             for m in state.get("messages") or []
@@ -186,11 +179,8 @@ def gather_node_factory(loop: Any) -> Any:
             }
             for i, st in enumerate(subtasks)
         ]
-        return {
-            "_stream_messages": [
-                _msg(StreamEvents.MULTI_AGENT_SUBAGENT, {"records": records})
-            ]
-        }
+        stream_custom(writer, StreamEvents.MULTI_AGENT_SUBAGENT, {"records": records})
+        return {}
 
     return _gather
 
@@ -204,6 +194,7 @@ def finalize_node_factory(
     """finalize 节点：终局归纳 LLM 生成最终答复（MULTI_AGENT_DONE/ANSWER_END）。"""
 
     def _finalize(state: Dict[str, Any]) -> Dict[str, Any]:
+        writer = get_stream_writer()
         messages: list[BaseMessage] = list(state.get("messages") or [])
         user_text = ""
         for m in reversed(messages):
@@ -237,22 +228,22 @@ def finalize_node_factory(
         except Exception as exc:  # noqa: BLE001 - 回退归并原文
             logger.warning("终局归纳失败，回退归并原文: %s", exc)
 
-        return {
-            "_stream_messages": [
-                _msg(StreamEvents.MULTI_AGENT_DONE, {"content": final_text, "task": user_text}),
-                _msg(StreamEvents.ANSWER_DELTA, {"content": final_text}),
-                _msg(
-                    StreamEvents.ANSWER_END,
-                    {
-                        "content": final_text,
-                        "messages": [
-                            *messages_to_dict(messages),
-                            {"role": "assistant", "content": final_text},
-                        ],
-                    },
-                ),
-            ],
-        }
+        stream_custom(
+            writer, StreamEvents.MULTI_AGENT_DONE, {"content": final_text, "task": user_text}
+        )
+        stream_custom(writer, StreamEvents.ANSWER_DELTA, {"content": final_text})
+        stream_custom(
+            writer,
+            StreamEvents.ANSWER_END,
+            {
+                "content": final_text,
+                "messages": [
+                    *messages_to_dict(messages),
+                    {"role": "assistant", "content": final_text},
+                ],
+            },
+        )
+        return {}
 
     return _finalize
 
@@ -266,7 +257,6 @@ def build_multi_agent_graph(
     checkpointer: Any = None,
     store: Any = None,
     knowledge_text: str = "",
-    emit: Optional[Any] = None,
 ) -> Any:
     """组装并编译多 Agent 主编排图。
 
@@ -278,14 +268,12 @@ def build_multi_agent_graph(
         checkpointer: 与 workers 共享的 checkpointer（SqliteSaver/InMemorySaver）。
         store: langgraph store（长期记忆）。
         knowledge_text: 环境知识（注入拆解/归纳提示）。
-        emit: 事件发射器（AgentEventEnvelope 用；None 零开销）。
     """
-    loop = type("_L", (), {"event_emitter": emit})() if emit is not None else None
     builder = StateGraph(MultiGraphState)
     builder.add_node("decompose", decompose_node_factory(orchestrator_llm, knowledge_text=knowledge_text))
     builder.add_node("business_worker", business_worker)  # 官方子图节点
     builder.add_node("command_worker", command_worker)  # 官方子图节点
-    builder.add_node("gather", gather_node_factory(loop))
+    builder.add_node("gather", gather_node_factory())
     builder.add_node("finalize", finalize_node_factory(finalizer_llm, knowledge_text=knowledge_text))
 
     builder.add_edge(START, "decompose")

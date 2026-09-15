@@ -19,12 +19,11 @@ import logging
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Send
 
-from GSagent.core.orchestration.nodes import _msg
-from GSagent.core.orchestration.state import _append_list
 from GSagent.core.plan.planner import (
     PlanError,
     PlanRunResult,
@@ -34,7 +33,7 @@ from GSagent.core.plan.planner import (
     merge_plan_results,
     plan_with_llm,
 )
-from GSagent.utils.stream import StreamEvents
+from GSagent.utils.stream import StreamEvents, stream_custom
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,6 @@ class PlanGraphState(TypedDict, total=False):
     results: Annotated[Dict[str, Any], _dict_merge]  # {tid: PlanTaskResult dict}
     failed: List[str]
     request_context: Optional[Dict[str, Any]]
-    _stream_messages: Annotated[List[Dict[str, Any]], _append_list]
 
 
 # ---- 节点 ----
@@ -62,6 +60,7 @@ def plan_node_factory(planner_llm: Any) -> Any:
     """plan 节点：LLM 规划 DAG → batches；失败产 PLAN 错误事件。"""
 
     def _plan(state: Dict[str, Any]) -> Dict[str, Any]:
+        writer = get_stream_writer()
         messages: list[BaseMessage] = list(state.get("messages") or [])
         user_text = ""
         for m in reversed(messages):
@@ -71,25 +70,23 @@ def plan_node_factory(planner_llm: Any) -> Any:
         try:
             tasks = plan_with_llm(planner_llm, user_text)
         except PlanError as exc:
-            return {
-                "_stream_messages": [
-                    _msg(StreamEvents.PLAN, {"error": str(exc), "tasks": [], "batches": []}),
-                    _msg(StreamEvents.ERROR, {"error": f"计划失败: {exc}"}),
-                ]
-            }
+            stream_custom(
+                writer, StreamEvents.PLAN, {"error": str(exc), "tasks": [], "batches": []}
+            )
+            stream_custom(writer, StreamEvents.ERROR, {"error": f"计划失败: {exc}"})
+            return {}
         batches = compute_batches(tasks)
+        stream_custom(
+            writer,
+            StreamEvents.PLAN,
+            {"tasks": [t.to_dict() for t in tasks], "batches": batches},
+        )
         return {
             "plan_tasks": [t.to_dict() for t in tasks],
             "batches": batches,
             "batch_index": 0,
             "results": {},
             "failed": [],
-            "_stream_messages": [
-                _msg(
-                    StreamEvents.PLAN,
-                    {"tasks": [t.to_dict() for t in tasks], "batches": batches},
-                )
-            ],
         }
 
     return _plan
@@ -136,10 +133,9 @@ def skip_task(state: Dict[str, Any]) -> Dict[str, Any]:
         "result": "依赖的子任务失败，已跳过。",
         "batch": int(state.get("batch_index", 0)),
     }
-    return {
-        "results": {tid: result},
-        "_stream_messages": [_msg(StreamEvents.PLAN_TASK, result)],
-    }
+    writer = get_stream_writer()
+    stream_custom(writer, StreamEvents.PLAN_TASK, result)
+    return {"results": {tid: result}}
 
 
 def collect(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,12 +204,10 @@ def finalize_node_factory() -> Any:
         }
         run = PlanRunResult(tasks=plan_tasks, batches=batches, results=results)
         merged = merge_plan_results(run)
-        return {
-            "_stream_messages": [
-                _msg(StreamEvents.ANSWER_DELTA, {"content": merged}),
-                _msg(StreamEvents.ANSWER_END, {"content": merged, "messages": []}),
-            ]
-        }
+        writer = get_stream_writer()
+        stream_custom(writer, StreamEvents.ANSWER_DELTA, {"content": merged})
+        stream_custom(writer, StreamEvents.ANSWER_END, {"content": merged, "messages": []})
+        return {}
 
     return _finalize
 

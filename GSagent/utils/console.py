@@ -71,16 +71,13 @@ _STATUS_LABELS = {
 }
 
 
-def print_banner(model: str, tool_count: int, compaction_enabled: bool = True) -> None:
+def print_banner(model: str, tool_count: int) -> None:
     """打印启动横幅。"""
-    compaction_state = (
-        Text("开", style="green") if compaction_enabled else Text("关", style="red")
-    )
     banner = Table(show_header=False, show_edge=False, box=None, padding=(0, 2))
     banner.add_row(Text("🤖 Agent", style="bold magenta"), Text(f"模型: {model}", style=MUTED_COLOR))
     banner.add_row(
         Text(""),
-        Text(f"工具数: {tool_count}  |  上下文压缩: ", style=MUTED_COLOR) + compaction_state,
+        Text(f"工具数: {tool_count}", style=MUTED_COLOR),
     )
     console.print(
         Panel(banner, border_style="magenta", title="[bold]Agent 命令行[/bold]", title_align="left")
@@ -206,17 +203,10 @@ def print_approval_request(tool_name: str, params: Dict[str, Any]) -> None:
     console.print(Panel(body, border_style=WARN_COLOR, title="[bold]⚠ 需要审批[/bold]"))
 
 
-def print_compaction_start(current_tokens: Any, max_tokens: Any) -> None:
-    """打印压缩开始提示。"""
+def print_summary(old_count: int, new_count: int) -> None:
+    """打印摘要式上下文压缩提示。"""
     console.print(
-        f"  [{INFO_COLOR}]ℹ 正在压缩上下文（{current_tokens}/{max_tokens} tokens）...[/{INFO_COLOR}]"
-    )
-
-
-def print_compacted(old_count: int, new_count: int) -> None:
-    """打印压缩完成提示。"""
-    console.print(
-        f"  [{INFO_COLOR}]✔ 上下文已压缩: {old_count} -> {new_count} 条消息[/{INFO_COLOR}]"
+        f"  [{INFO_COLOR}]ℹ 上下文已摘要压缩: {old_count} -> {new_count} 条消息[/{INFO_COLOR}]"
     )
 
 

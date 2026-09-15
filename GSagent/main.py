@@ -9,10 +9,10 @@
 #   Config → create_single_graph_agent / create_multi_graph_agent /
 #            create_plan_graph_agent（纯 langgraph 装配，SqliteSaver 持久化）
 #   build_chat_messages → 构造 messages
-#   _run_turn() → 循环消费 GraphAgent.stream()：StreamMessage 渲染 + PauseRequest
-#                 审批暂停（per-interrupt-id resume）。
-# 设计要点：CLI 只见 GraphAgent.stream() 的 StreamMessage/PauseRequest 流，
-# 不接触底层 Tool/图细节 —— 解耦清晰（宪法 II）。
+#   _run_turn() → 循环消费 run_graph_session：langgraph custom 渲染事件 +
+#                 __interrupt__ 审批暂停（per-interrupt-id resume）。
+# 设计要点：CLI 直接消费 langgraph 原生流（custom/updates），不接触底层
+# Tool/图内部细节（拆壳后无 GraphAgent/StreamMessage/PauseRequest 对象层）。
 # =========================================================
 
 import json
@@ -36,11 +36,10 @@ from GSagent.common.cli_commons import (
     opt_json_output_file,
     opt_max_steps,
     opt_model,
-    opt_no_compaction,
     opt_verbose,
 )
 from GSagent.config import Config
-from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
+from GSagent.core.agents.runtime import AgentRuntime, run_graph_session
 from GSagent.core.eval.dataset import EvalDatasetError, load_dataset
 from GSagent.core.eval.metrics import compare_baseline
 from GSagent.core.eval.runner import OfflineLLM, load_baseline, run_eval, save_baseline
@@ -72,11 +71,10 @@ from GSagent.utils.console import (
     print_agent,
     print_approval_request,
     print_banner,
-    print_compacted,
-    print_compaction_start,
     print_error,
     print_hint,
     print_rule,
+    print_summary,
     print_tool_result,
     print_user,
     print_warning,
@@ -138,8 +136,8 @@ def _create_agent(config: Config):
 
 def _create_multi_agent(
     config: Config, max_subagents: Optional[int] = None
-) -> GraphAgent:
-    """装配多Agent GraphAgent（create_agent 主编排图：decompose → Send 并行）。
+) -> AgentRuntime:
+    """装配多Agent runtime（create_agent 主编排图：decompose → Send 并行）。
 
     max_subagents: CLI 显式覆盖（`agent chat --max-subagents`），优先于配置。
 
@@ -179,27 +177,26 @@ def _append_tool_result(
 
 
 def _consume_stream(
-    agent: GraphAgent,
+    runtime: AgentRuntime,
     messages: List[Dict[str, Any]],
     resume_map: Optional[Dict[str, Dict[str, Any]]],
     session_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """执行一次 GraphAgent.stream 遍历，边接收事件边打印（图消费器）。
+    """执行一次 run_graph_session 遍历，边接收事件边打印（图消费器）。
 
     参数:
+        runtime: AgentRuntime（编译图 + 横切能力数据包）。
         session_id: 会话 ID，随 request_context 传入以便审计事件按会话聚合
             （US2 T022/T023，FR-005/007）。
 
     返回:
         (final, pause)：final 是回合完成时的 ANSWER_END 数据；
-        当流因等待用户输入而暂停时设置 pause，含
-        kind（'approval'|'frontend'）、tool_name、tool_call_id、messages。
+        当流因等待用户输入而暂停时设置 pause，含 kind（'approval'|'frontend'）、
+        pauses（langgraph Interrupt 列表）、messages。
     """
     final: Optional[Dict[str, Any]] = None
-    pause: Optional[Dict[str, Any]] = None
-    message_count: Optional[int] = None
     streamed_text = ""
-    pauses: List[PauseRequest] = []
+    pauses: List[Any] = []  # langgraph Interrupt 对象
 
     turn_start = time.monotonic()
 
@@ -222,85 +219,83 @@ def _consume_stream(
     spinner.start()
 
     try:
-        for item in agent.stream(  # GraphAgent.stream：StreamMessage 渲染 + PauseRequest 暂停
+        for mode, chunk in run_graph_session(
+            runtime,
             messages=messages,
             session_id=session_id or "session",
             resume=resume_map or None,
         ):
-            if isinstance(item, PauseRequest):
+            if mode == "updates" and "__interrupt__" in chunk:
                 # 审批/前端暂停（per-interrupt-id）：收集全部后一次返回
                 stop_spinner()
-                pauses.append(item)
+                pauses.extend(chunk["__interrupt__"])
                 continue
-            event = item  # StreamMessage
-            if event.event == StreamEvents.ANSWER_DELTA:
+            if mode != "custom":
+                continue
+            etype = chunk["type"]
+            data = chunk.get("data") or {}
+            if etype == StreamEvents.ANSWER_DELTA:
                 # 把流式内容滚进单行转圈里（IDE 伪终端里多行 Live 刷新不可靠）；
                 # 完整答案卡片在 ANSWER_END 时才一次性打印。
-                streamed_text += event.data.get("content", "")
+                streamed_text += data.get("content", "")
                 tail = " ".join(streamed_text.split())[-40:]
                 ensure_spinner(f"作答中 … {tail}")
-            elif event.event == StreamEvents.ANSWER_END:
-                final = event.data
+            elif etype == StreamEvents.ANSWER_END:
+                final = data
                 stop_spinner()
                 print_agent(
-                    event.data.get("content", ""),
+                    data.get("content", ""),
                     elapsed=time.monotonic() - turn_start,
                 )
-            elif event.event == StreamEvents.START_TOOL:
-                ensure_spinner(f"正在执行 {event.data.get('tool_name', '?')} …")
-            elif event.event == StreamEvents.TOOL_RESULT:
+            elif etype == StreamEvents.START_TOOL:
+                ensure_spinner(f"正在执行 {data.get('tool_name', '?')} …")
+            elif etype == StreamEvents.TOOL_RESULT:
                 # 先停掉瞬时转圈再写结果行，rich 才能干净输出
                 # （活跃的单行转圈会覆盖 IDE 伪终端里带外的 console.print）。
                 stop_spinner()
                 print_tool_result(
-                    event.data.get("tool_name", "?"),
-                    event.data.get("status", "?"),
-                    event.data.get("execution_time_ms", 0.0),
-                    invocation=event.data.get("invocation"),
-                    return_code=event.data.get("return_code"),
+                    data.get("tool_name", "?"),
+                    data.get("status", "?"),
+                    data.get("execution_time_ms", 0.0),
+                    invocation=data.get("invocation"),
+                    return_code=data.get("return_code"),
                 )
                 ensure_spinner("思考中 …")
-            elif event.event == StreamEvents.MULTI_AGENT_DECOMPOSE:
-                task = event.data.get("task", "")
+            elif etype == StreamEvents.MULTI_AGENT_DECOMPOSE:
+                task = data.get("task", "")
                 ensure_spinner(f"编排拆解任务 … {task[:40]}")
-            elif event.event == StreamEvents.MULTI_AGENT_SUBAGENT:
-                # 多Agent 事件：SubAgent 启停/结果（T017 向后兼容新增）
+            elif etype == StreamEvents.MULTI_AGENT_SUBAGENT:
+                # 多Agent 事件：子任务明细（records，T017 向后兼容）
                 stop_spinner()
-                print_tool_result(
-                    f"SubAgent[{event.data.get('worker', '?')}]",
-                    event.data.get("state", "?"),
-                    0.0,
-                    invocation=event.data.get("text"),
-                )
+                for rec in data.get("records") or []:
+                    print_tool_result(
+                        f"SubAgent[{rec.get('index', '?')}]",
+                        rec.get("kind") or "?",
+                        0.0,
+                        invocation=rec.get("result"),
+                    )
                 ensure_spinner("调度中 …")
-            elif event.event == StreamEvents.MULTI_AGENT_DONE:
+            elif etype == StreamEvents.MULTI_AGENT_DONE:
                 ensure_spinner("多Agent 任务完成 …")
-            elif event.event == StreamEvents.COMPACTION_START:
-                message_count = event.data.get("message_count")
-                ensure_spinner("正在压缩上下文 …")
-                print_compaction_start(
-                    event.data.get("current_tokens", "?"),
-                    event.data.get("max_tokens", "?"),
-                )
-            elif event.event == StreamEvents.COMPACTED:
-                print_compacted(
-                    message_count if message_count is not None else "...",
-                    event.data.get("new_message_count", "?"),
+            elif etype == StreamEvents.SUMMARY:
+                print_summary(
+                    data.get("old_count", "..."),
+                    data.get("new_count", "?"),
                 )
                 ensure_spinner("思考中 …")
-            elif event.event == StreamEvents.ERROR:
+            elif etype == StreamEvents.ERROR:
                 stop_spinner()
-                print_error(event.data.get("error", "未知错误"))
+                print_error(data.get("error", "未知错误"))
     finally:
         stop_spinner()
 
     if pauses:
         return final, {"kind": "pause", "pauses": pauses, "messages": messages}
-    return final, pause
+    return final, None
 
 
 def _run_turn(
-    agent: GraphAgent,
+    runtime: AgentRuntime,
     messages: List[Dict[str, Any]],  # 本轮请求的初始消息
     can_prompt: bool,
     session_id: Optional[str] = None,
@@ -308,7 +303,7 @@ def _run_turn(
     """运行整个会话：循环消费流事件，途中解决审批/前端暂停。
 
     参数:
-        agent: GraphAgent 实例。
+        runtime: AgentRuntime 实例。
         messages: 本轮请求的初始消息。
         can_prompt: 是否可以向用户交互式询问决策。
         session_id: 会话 ID，透传给 _consume_stream 供审计按会话聚合。
@@ -325,7 +320,7 @@ def _run_turn(
     session_history = list(messages)
 
     while True:
-        final, pause = _consume_stream(agent, session_history, resume_map, session_id)
+        final, pause = _consume_stream(runtime, session_history, resume_map, session_id)
 
         if pause is None:
             session_history = final.get("messages") if final else session_history
@@ -334,12 +329,12 @@ def _run_turn(
             return final, session_history
 
         session_history = pause["messages"]
-        pr_list: List[PauseRequest] = pause.get("pauses") or []
+        pr_list: List[Any] = pause.get("pauses") or []  # langgraph Interrupt
         resume_map = {}
 
         for pr in pr_list:
-            if pr.type == "approval":
-                value = pr.value or {}
+            value = pr.value or {}
+            if value.get("type") == "approval":
                 # 兼容多 Agent 子图冒泡（pending_approvals 列表）与单 Agent 单请求
                 pending: List[Dict[str, Any]] = value.get("pending_approvals") or [value]
                 for item in pending:
@@ -375,7 +370,7 @@ def _run_turn(
                             approval_summary["auto_denied"] += 1
             else:  # frontend pause
                 print_warning(
-                    f"工具 '{pr.value.get('tool_name', '?')}' 正在等待前端执行器，"
+                    f"工具 '{value.get('tool_name', '?')}' 正在等待前端执行器，"
                     "但当前 CLI 没有前端，已中止该工具调用。"
                 )
                 resume_map[pr.id] = {
@@ -383,20 +378,6 @@ def _run_turn(
                         "value": "Frontend execution is not available in this environment."
                     }
                 }
-
-
-def _pause_params(pause: Dict[str, Any]) -> Dict[str, Any]:
-    """如果可用，从历史记录中提取被暂停工具调用的参数。"""
-    for msg in reversed(pause["messages"]):
-        if msg.get("role") != "assistant":
-            continue
-        for tc in msg.get("tool_calls", []):
-            if tc.get("id") == pause["tool_call_id"]:
-                try:
-                    return json.loads(tc.get("function", {}).get("arguments", "{}"))
-                except Exception:
-                    return {}
-    return {}
 
 
 @app.callback()
@@ -433,7 +414,6 @@ def run(
     config_file: Optional[Path] = opt_config_file,
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose,
-    no_compaction: bool = opt_no_compaction,
     json_output_file: Optional[str] = opt_json_output_file,
     echo_request: bool = typer.Option(
         True,
@@ -464,7 +444,6 @@ def run(
         model=model,
         base_url=base_url,
         max_steps=max_steps,
-        no_compaction=no_compaction,
         hitl=hitl,
     )
 
@@ -545,15 +524,15 @@ def run(
 
 
 def _run_plan_turn(
-    agent: GraphAgent,
+    runtime: AgentRuntime,
     user_input: str,
     session_id: str,
     can_prompt: bool = False,
 ) -> Optional[str]:
     """Plan-and-Execute 单回合（US3 T028，FR-008，contracts/cli.md）。
 
-    走 Plan GraphAgent（规划 → Send 批次并行 → 归并），产出 PLAN/PLAN_TASK/
-    ANSWER_END 事件（宪法 II：CLI 只见 StreamMessage）。返回归并文本；失败返回 None。
+    走 Plan runtime（规划 → Send 批次并行 → 归并），产出 PLAN/PLAN_TASK/
+    ANSWER_END 事件（CLI 消费 langgraph custom 流）。返回归并文本；失败返回 None。
     """
     messages = build_chat_messages(ask=user_input, toolsets=[])
     final, _ = _run_turn(agent, messages, can_prompt=can_prompt, session_id=session_id)
@@ -813,7 +792,6 @@ def chat(
     config_file: Optional[Path] = opt_config_file,
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose, #
-    no_compaction: bool = opt_no_compaction,
     multi_agent: bool = typer.Option(
         False,
         "--multi-agent",
@@ -848,7 +826,6 @@ def chat(
         model=model,
         base_url=base_url,
         max_steps=max_steps,
-        no_compaction=no_compaction,
         hitl=hitl,
     )
 
@@ -887,7 +864,6 @@ def chat(
         print_banner(
             model=config.data["llm"]["model"],
             tool_count=len(plan_agent.tools_registry),
-            compaction_enabled=True,
         )
         print_hint(
             "Plan-and-Execute 模式：先规划任务 DAG，再按依赖批次并行执行。"
@@ -917,7 +893,6 @@ def chat(
         print_banner(
             model=config.data["llm"]["model"],
             tool_count=len(registry) if registry else 0,
-            compaction_enabled=True,
         )
         print_hint(
             "多Agent 编排模式：主/编排/业务/SubAgent 协作。"
@@ -940,7 +915,6 @@ def chat(
     print_banner(
         model=config.data["llm"]["model"],
         tool_count=len(registry),
-        compaction_enabled=agent.enable_compaction,
     )
     print_hint("输入你的问题，'/exit' 或 Ctrl+C 退出。\n")
 

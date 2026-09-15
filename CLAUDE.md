@@ -35,8 +35,8 @@ mypy
 |---|---|---|
 | CLI 入口 | `GSagent/main.py` | 命令路由、配置加载（`run`/`chat`/`serve`/`toolset`/`agents`/`skills`/`history`/`tasks`/`snapshot`/`eval`/`version`） |
 | 配置 | `GSagent/config.py` | 组合根：`create_single_graph_agent` / `create_multi_graph_agent` / `create_plan_graph_agent` / `create_tools_registry` / `create_saver` / `create_store` / `policy_components` / `create_cost_estimator`；四层覆盖（默认←YAML←环境变量←CLI） |
-| 核心引擎 | `GSagent/core/` | 纯 langgraph 执行：`GraphAgent` 外壳（`core/agents/graph_agent.py`，CLI/serve 唯一入口，`stream()` 产 StreamMessage 渲染事件 + PauseRequest 暂停，per-interrupt-id resume）、单 Agent 图（`core/orchestration/graph.py` build_graph_agent：guard_in/agent/ToolNode/guard_out）、多 Agent 主编排图（`core/orchestration/multi.py`：decompose → Send 并行 → create_agent worker 子图 → finalize）、Plan 图（`core/orchestration/plan.py`：批次 Send 并行）、create_agent worker 工厂（`core/orchestration/workers.py`）、审批下沉包装（`core/tools/approval.py`，interrupt 进 @tool）、langchain 工具注册表（`core/tools/registry.py`，@tool + 守卫 + 动态审批）、提示词、截断、LLM 装配（`core/providers/factory.py`，ChatOpenAI） |
-| 安全策略 | `GSagent/core/policy/` | PathGuard / CommandGuard / HitlPolicy / AuditLog + 输入/输出侧 Guardrail（`input_guard.py` / `output_guard.py`，宪法 11.1 三道 Guardrail），注入 ToolRegistry 与 GraphAgent |
+| 核心引擎 | `GSagent/core/` | 纯 langgraph 执行：会话运行辅助 `AgentRuntime`（`core/agents/runtime.py`，CLI/serve 唯一装配产物，`run_graph_session` 直接消费 langgraph 原生流：custom 渲染事件 + `__interrupt__` 审批暂停，per-interrupt-id resume）、单 Agent 图（`core/orchestration/graph.py` build_graph_agent：guard_in/agent/ToolNode/guard_out）、多 Agent 主编排图（`core/orchestration/multi.py`：decompose → Send 并行 → create_agent worker 子图 → finalize）、Plan 图（`core/orchestration/plan.py`：批次 Send 并行）、create_agent worker 工厂（`core/orchestration/workers.py`）、审批下沉包装（`core/tools/approval.py`，interrupt 进 @tool）、langchain 工具注册表（`core/tools/registry.py`，@tool + 守卫 + 动态审批）、提示词、摘要压缩（`core/truncation/summarizer.py`，`maybe_summarize` 纯函数）、LLM 装配（`core/providers/factory.py`，ChatOpenAI） |
+| 安全策略 | `GSagent/core/policy/` | PathGuard / CommandGuard / HitlPolicy / AuditLog + 输入/输出侧 Guardrail（`input_guard.py` / `output_guard.py`，宪法 11.1 三道 Guardrail），注入 ToolRegistry 与 AgentRuntime |
 | Plan-and-Execute | `GSagent/core/orchestration/plan.py` | LLM 产出任务 DAG（`core/plan/planner.py` 复用），按依赖批次 Send 并行执行，失败定位 |
 | 运行时 | `GSagent/core/runtime/` | `serve`（FastAPI：线程/回合/SSE）+ SQLite 持久化任务队列（原子租约、取消保护、崩溃恢复） |
 | 记忆系统 | `GSagent/core/memory/` | 长期记忆业务语义（`langgraph_store.py` `StoreMemoryAdapter` over langgraph BaseStore：namespace=(user,scope)、content_hash 去重、离线打分召回、LRU 配额、user 隔离；`saver.py` SqliteSaver/SqliteStore 工厂）+ 会话记忆目录（`SessionMemoryStore` 每轮落盘，主路径由 checkpointer 持久化） |
@@ -45,7 +45,7 @@ mypy
 | 终端适配 | `GSagent/core/env/terminal.py` | PowerShell / bash / zsh 探测与命令改写 |
 | 可观测对象模型 | `GSagent/core/observability/` | 业务与可观测四层对象（会话→任务→Agent→事件）+ 九类事件 + 指标聚合（仅事件流）+ 业务↔A2A 协议映射；`telemetry.py` 为 OTel 接入（方案 A 自动埋点 + 手动业务 span，`observability.enabled` 关闭即零初始化）；`emitter.py` 事件流接线（AgentEventEnvelope 随执行产生，trace/span_id 取自 OTel context） |
 | 插件系统 | `GSagent/plugins/toolsets/` | langchain `@tool` 工具集（bash/filesystem/sandbox/memory 的 `lc_tools.py` + `yaml_lc_loader.py`），`Config.create_tools_registry()` 注册进 ToolRegistry |
-| 通用工具 | `GSagent/utils/` | rich console、StreamEvents 事件流、日志、文件/流式 IO |
+| 通用工具 | `GSagent/utils/` | rich console、StreamEvents custom 事件协议 + `event_to_sse`、日志、文件/流式 IO |
 
 ### CLI 命令一览
 
@@ -68,9 +68,9 @@ chat 内斜杠命令：`/exit` `/hitl <mode>` `/remember <内容>` `/memory [que
 ### Key Patterns
 
 - **插件架构**：每个工具集以 langchain `@tool` 装饰器定义（`lc_tools.py`），工厂 `create_xxx_tools(config)` 返回 `@tool` 列表；`Config.create_tools_registry()` 注册进 `ToolRegistry`（含守卫包装）；bash/sandbox 的**动态审批**经 `approval.py` 的 `wrap_with_approval` **审批下沉进 @tool**（`interrupt()` 人在回环，per-interrupt-id resume，任何 ToolNode/create_agent 复用同一套审批）
-- **组合根**：`Config` 是唯一装配点，`main.py` 只从这里拿拼好的对象（构造函数注入，不内部 new）；CLI/serve 只消费 `GraphAgent.stream()` 的 `StreamMessage`（渲染）+ `PauseRequest`（审批暂停）流，不接触底层 Tool/图细节（宪法 II）
+- **组合根**：`Config` 是唯一装配点，`main.py` 只从这里拿拼好的对象（构造函数注入，不内部 new）；CLI/serve 只消费 `run_graph_session()` 的 langgraph 原生流（custom 渲染事件 + `__interrupt__` 审批暂停，per-interrupt-id resume），不接触底层 Tool/图细节（宪法 II）
 - **配置向后兼容**：重命名字段时用 Pydantic `extra="allow"` + `model_validator` 映射旧名，不在 schema 中保留废弃字段（宪法 III；当前 `config.py` 用 dict + `_deep_merge`，尚未迁移 Pydantic，见 docs/implementation-notes.md）
-- **类层次结构**：新增字段/方法时放在最通用的层级（公共编排行为承载于 `GraphAgent` / 各图节点工厂），不要因 issue 提到特定子类就限缩范围（宪法 V）
+- **类层次结构**：新增字段/方法时放在最通用的层级（公共编排行为承载于 `AgentRuntime` 数据包 / 各图节点工厂），不要因 issue 提到特定子类就限缩范围（宪法 V）
 - **重试**：使用 `tenacity` 库，不要手写重试循环
 - **企业级安全**：策略组件（path/command 守卫 + HITL 三态 + 审计）由 `Config.policy_components()` 统一构建并注入，HITL 支持运行时 `/hitl` 切换；审计 JSONL 全量留痕且密钥脱敏
 

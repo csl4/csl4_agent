@@ -39,10 +39,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from GSagent.config import Config
-from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
+from GSagent.core.agents.runtime import AgentRuntime, run_graph_session
 from GSagent.core.prompts import build_chat_messages
 from GSagent.core.runtime.tasks import DurableTaskManager, queue_db_path
-from GSagent.utils.stream import StreamEvents
+from GSagent.utils.stream import StreamEvents, event_to_sse
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class _EventBuffer:
 def create_app(
     config: Optional[Config] = None,
     *,
-    agent: Optional[GraphAgent] = None,
+    agent: Optional[AgentRuntime] = None,
     task_manager: Optional[DurableTaskManager] = None,
     hitl_mode: str = "never",
     worker_interval: float = 0.1,
@@ -104,7 +104,7 @@ def create_app(
     """构建 Runtime API 应用。
 
     config：配置（组装默认 agent 与任务队列路径）；agent/task_manager 均注入时可为 None。
-    agent：可注入的 GraphAgent（测试用 FakeChatLLM 打桩）；None 时按 config 装配。
+    agent：可注入的 AgentRuntime（测试用 FakeChatLLM 打桩）；None 时按 config 装配。
     task_manager：可注入；None 时按 runtime.queue_db 新建。
     hitl_mode：serve 审批模式，默认 never（无审批界面 → 危险操作拒绝，FR-004）。
     """
@@ -182,19 +182,25 @@ def create_app(
             try:
                 while True:
                     saw_pause = False
-                    for item in app.state.agent.stream(
+                    for mode, chunk in run_graph_session(
+                        app.state.agent,
                         messages=final_msgs,
                         session_id=thread_id,
                         resume=resume,
                     ):
-                        if isinstance(item, PauseRequest):
+                        if mode == "updates" and "__interrupt__" in chunk:
                             # serve 无人类审批界面 → 自动拒绝该审批（FR-004）
-                            resume = {item.id: {"approved": False}}
+                            resume = {
+                                intr.id: {"approved": False}
+                                for intr in chunk["__interrupt__"]
+                            }
                             saw_pause = True
                             continue
-                        buffer.push(item.to_sse())
-                        if item.event == StreamEvents.ANSWER_END:
-                            final_msgs = item.data.get("messages", final_msgs)
+                        if mode != "custom":
+                            continue
+                        buffer.push(event_to_sse(chunk))
+                        if chunk.get("type") == StreamEvents.ANSWER_END:
+                            final_msgs = chunk.get("data", {}).get("messages", final_msgs)
                     if not saw_pause:
                         break
             except Exception as exc:  # noqa: BLE001 - 回合失败也关闭事件流
@@ -302,15 +308,17 @@ def _run_one_task(app: FastAPI, scope: str) -> None:
         resume: Optional[Dict[str, Dict[str, Any]]] = None
         while True:
             saw_pause = False
-            for item in state.agent.stream(
-                messages=messages, session_id=tid, resume=resume
+            for mode, chunk in run_graph_session(
+                state.agent, messages=messages, session_id=tid, resume=resume
             ):
-                if isinstance(item, PauseRequest):
+                if mode == "updates" and "__interrupt__" in chunk:
                     # 后台任务无审批界面 → 自动拒绝
-                    resume = {item.id: {"approved": False}}
+                    resume = {
+                        intr.id: {"approved": False} for intr in chunk["__interrupt__"]
+                    }
                     saw_pause = True
                     continue
-                if item.event == StreamEvents.ANSWER_END:
+                if mode == "custom" and chunk.get("type") == StreamEvents.ANSWER_END:
                     break
             if not saw_pause:
                 break

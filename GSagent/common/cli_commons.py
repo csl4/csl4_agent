@@ -67,13 +67,6 @@ opt_verbose: Optional[List[bool]] = typer.Option(
     help="Verbose output. Pass multiple times to increase verbosity (-v/-vv/-vvv)",
 )
 
-# Disable context compaction
-opt_no_compaction: bool = typer.Option(
-    False,
-    "--no-compaction",
-    help="Disable automatic context compaction when the conversation nears the context window limit",
-)
-
 # JSON output file
 opt_json_output_file: Optional[str] = typer.Option(
     None,

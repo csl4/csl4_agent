@@ -1,9 +1,9 @@
-"""智能体的上下文截断与压缩模块。"""
+"""智能体的上下文摘要压缩（拆壳后：纯函数，节点内调用）。"""
 
-from GSagent.core.truncation.compaction import SessionCompactor
-from GSagent.core.truncation.input_context_window_limiter import ContextWindowLimiter
+from GSagent.core.truncation.summarizer import (
+    DEFAULT_SUMMARY_PROMPT,
+    SummaryMeta,
+    maybe_summarize,
+)
 
-__all__ = [
-    "SessionCompactor",
-    "ContextWindowLimiter",
-]
+__all__ = ["DEFAULT_SUMMARY_PROMPT", "SummaryMeta", "maybe_summarize"]

@@ -2,6 +2,8 @@
 
 > 来源：`spec.md` FR-003/004/005/011/013 ｜ 设计：`research.md` R-02/R-03 ｜ 数据模型：`data-model.md` §1
 
+> **后续简化（拆壳）**：本契约描述的是历史架构。后续已拆掉 `ToolCallingLLM`/`GraphAgent`/`StreamMessage`/`PauseRequest` 对象层与 `_stream_messages` 状态通道；CLI/serve 经 `run_graph_session()` 直接消费 langgraph 原生流（`stream_mode="custom"` 渲染事件 + `__interrupt__` 审批暂停），暂停恢复用 `Command(resume={interrupt_id: {...}})`。见 `GSagent/core/agents/runtime.py` 与 `GSagent/utils/stream.py`。
+
 ## 目的
 
 定义 LangGraph 编排层对外的**稳定契约**：`ToolCallingLLM` 外壳接口不变，编排图内部实现，两者解耦。消费方（CLI / serve / 多 Agent / Plan 模式）零改动。

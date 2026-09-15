@@ -4,10 +4,9 @@
 - 消息：``BaseMessage`` 列表（``add_messages`` reducer 追加合并）
 - LLM：``loop.chat_model``（BaseChatModel，bind_tools），``invoke`` 得 ``AIMessage``
 - 工具：langchain ``BaseTool`` 注册表 + 守卫/审批包装层（``tools/registry.py``）
+- 渲染事件：节点经 ``get_stream_writer()`` 推 custom 流（``stream_custom``），
+  CLI/serve 直接消费（拆壳后无 ``_stream_messages`` 状态通道）
 - 暂停（审批/前端）：``interrupt()``（人在回环），恢复 ``Command(resume=...)``
-
-外部契约：``call_stream`` 输入 OpenAI dict 经 ``dict_to_messages`` 转换；事件中的
-消息快照经 ``messages_to_dict`` 输出（消费方零改动）。
 """
 
 from typing import Any, Callable, Dict, List, Optional
@@ -17,27 +16,20 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
 )
+from langgraph.config import get_stream_writer
 
-from GSagent.core.llm_adapter import (
-    dict_to_messages,
-    extract_usage,
-    messages_to_dict,
-)
+from GSagent.core.llm_adapter import extract_usage, messages_to_dict
 from GSagent.core.observability import (
     AgentEventEnvelope,
     AgentEventType,
     LogLevel,
 )
 from GSagent.core.observability.models import payload_redacted
-from GSagent.utils.stream import StreamEvents, StreamMessage
+from GSagent.core.truncation.summarizer import maybe_summarize
+from GSagent.utils.stream import StreamEvents, stream_custom
 
 
 # ---- 事件缓冲辅助 ----
-def _msg(event: StreamEvents, data: Dict[str, Any]) -> Dict[str, Any]:
-    """构造缓冲用 StreamMessage 的 dict 形态。"""
-    return {"event": event.value, "data": data}
-
-
 def _current_trace_ids() -> tuple:
     """从 OTel 当前 span context 提取 (trace_id, span_id, parent_span_id)。"""
     try:
@@ -114,9 +106,10 @@ def guard_in_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
     """输入侧 Guardrail：校验最新用户输入；拦截则终止本轮。"""
 
     def _guard_in(state: Dict[str, Any]) -> Dict[str, Any]:
+        writer = get_stream_writer()
         guard = getattr(loop, "input_guard", None)
         if guard is None:
-            return {"_stream_messages": []}
+            return {}
         messages = state.get("messages") or []
         last_user = next(
             (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
@@ -136,19 +129,16 @@ def guard_in_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
                         outcome="blocked",
                         session_id=session_id,
                     )
-                return {
-                    "_stream_messages": [
-                        _msg(
-                            StreamEvents.ERROR,
-                            {
-                                "error": f"Input blocked: {result.reason}",
-                                "guardrail": True,
-                            },
-                        )
-                    ],
-                    "terminated": "blocked",
-                }
-        return {"_stream_messages": []}
+                stream_custom(
+                    writer,
+                    StreamEvents.ERROR,
+                    {
+                        "error": f"Input blocked: {result.reason}",
+                        "guardrail": True,
+                    },
+                )
+                return {"terminated": "blocked"}
+        return {}
 
     return _guard_in
 
@@ -158,29 +148,30 @@ def agent_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
     """Agent 节点：压缩 → 调 LLM（bind_tools）→ 判定（熔断/死循环）。"""
 
     def _agent(state: Dict[str, Any]) -> Dict[str, Any]:
+        writer = get_stream_writer()
         messages: List[BaseMessage] = list(state.get("messages") or [])
         iteration: int = int(state.get("iteration", 0)) + 1
-        stream_msgs: List[Dict[str, Any]] = []
 
         cancel_event = state.get("cancel_event")
         if cancel_event is not None and cancel_event.is_set():
-            stream_msgs.append(_msg(StreamEvents.ERROR, {"error": "   cancelled by user."}))
-            return {"_stream_messages": stream_msgs, "terminated": "cancelled"}
+            stream_custom(writer, StreamEvents.ERROR, {"error": "   cancelled by user."})
+            return {"terminated": "cancelled"}
 
-        # 压缩（仅影响本次 LLM 输入；TODO(002)：长会话持久化）
-        if loop.enable_compaction and iteration < loop.max_steps:
-            dict_msgs = messages_to_dict(messages)
-            if loop._limiter.check_compaction_needed(dict_msgs, []):
-                stream_msgs.append(
-                    _msg(
-                        StreamEvents.COMPACTION_START,
-                        {"message_count": len(messages)},
-                    )
+        # 摘要式压缩（仅影响本次 LLM 输入；state.messages 保留完整历史）
+        if iteration < loop.max_steps:
+            llm_messages, meta = maybe_summarize(loop.chat_model, messages)
+            if meta is not None:
+                stream_custom(
+                    writer,
+                    StreamEvents.SUMMARY,
+                    {
+                        "old_count": meta.old_count,
+                        "new_count": meta.new_count,
+                        "current_tokens": meta.current_tokens,
+                        "max_tokens": meta.max_tokens,
+                    },
                 )
-                messages = dict_to_messages(loop._compactor.compact(dict_msgs))
-                stream_msgs.append(
-                    _msg(StreamEvents.COMPACTED, {"new_message_count": len(messages)})
-                )
+            messages = llm_messages
 
         # LLM 调用（bind_tools 原生 tool calling）
         _emit(
@@ -194,7 +185,7 @@ def agent_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
 
         # 流式 delta（非流式 invoke：content 单块）
         if response.content:
-            stream_msgs.append(_msg(StreamEvents.ANSWER_DELTA, {"content": response.content}))
+            stream_custom(writer, StreamEvents.ANSWER_DELTA, {"content": response.content})
 
         # 审计 + 事件（usage 经 extract_usage）
         usage = extract_usage(response)
@@ -241,36 +232,34 @@ def agent_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
             if guard is not None:
                 final_content = guard.check(str(final_content)).final_content
             all_msgs = messages + [response]
-            stream_msgs.append(
-                _msg(
-                    StreamEvents.USAGE,
-                    {
-                        "usage": {
-                            "total_tokens": usage.total_tokens,
-                            "prompt_tokens": usage.prompt_tokens,
-                            "completion_tokens": usage.completion_tokens,
-                            "model": loop.model_name,
-                            "estimated_cost": round(cost_usd, 6),
-                        }
-                    },
-                )
+            stream_custom(
+                writer,
+                StreamEvents.USAGE,
+                {
+                    "usage": {
+                        "total_tokens": usage.total_tokens,
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "model": loop.model_name,
+                        "estimated_cost": round(cost_usd, 6),
+                    }
+                },
             )
-            stream_msgs.append(
-                _msg(
-                    StreamEvents.ANSWER_END,
-                    {
-                        "content": final_content,
-                        "messages": messages_to_dict(all_msgs),
-                        "num_llm_calls": iteration,
-                        "usage": {
-                            "total_tokens": usage.total_tokens,
-                            "prompt_tokens": usage.prompt_tokens,
-                            "completion_tokens": usage.completion_tokens,
-                            "model": loop.model_name,
-                            "estimated_cost": round(cost_usd, 6),
-                        },
+            stream_custom(
+                writer,
+                StreamEvents.ANSWER_END,
+                {
+                    "content": final_content,
+                    "messages": messages_to_dict(all_msgs),
+                    "num_llm_calls": iteration,
+                    "usage": {
+                        "total_tokens": usage.total_tokens,
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "model": loop.model_name,
+                        "estimated_cost": round(cost_usd, 6),
                     },
-                )
+                },
             )
         else:
             last_tool_calls = [dict(tc) for tc in response.tool_calls]
@@ -292,7 +281,6 @@ def agent_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
             "prev_tool_calls": last_tool_calls,
             "no_progress_streak": no_progress_streak,
             "terminated": terminated,
-            "_stream_messages": stream_msgs,
         }
 
     return _agent
@@ -317,7 +305,7 @@ def guard_out_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
     """输出侧 Guardrail：处理熔断终态 + 输出校验。"""
 
     def _guard_out(state: Dict[str, Any]) -> Dict[str, Any]:
-        stream_msgs: List[Dict[str, Any]] = []
+        writer = get_stream_writer()
         messages: List[BaseMessage] = list(state.get("messages") or [])
         terminated: Optional[str] = state.get("terminated")
 
@@ -330,33 +318,31 @@ def guard_out_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
             if guard is not None and fallback_content:
                 fallback_content = guard.check(str(fallback_content)).final_content
             if fallback_content:
-                stream_msgs.append(
-                    _msg(
-                        StreamEvents.ANSWER_END,
-                        {
-                            "content": fallback_content,
-                            "messages": messages_to_dict(messages),
-                            "num_llm_calls": state.get("iteration", 0),
-                            "usage": {},
-                            "max_steps_reached": True,
-                        },
-                    )
+                stream_custom(
+                    writer,
+                    StreamEvents.ANSWER_END,
+                    {
+                        "content": fallback_content,
+                        "messages": messages_to_dict(messages),
+                        "num_llm_calls": state.get("iteration", 0),
+                        "usage": {},
+                        "max_steps_reached": True,
+                    },
                 )
             else:
-                stream_msgs.append(
-                    _msg(
-                        StreamEvents.ERROR,
-                        {
-                            "error": (
-                                f"Max steps ({loop.max_steps}) reached without a final "
-                                "answer. Increase the step limit or simplify the task."
-                            ),
-                            "messages": messages_to_dict(messages),
-                        },
-                    )
+                stream_custom(
+                    writer,
+                    StreamEvents.ERROR,
+                    {
+                        "error": (
+                            f"Max steps ({loop.max_steps}) reached without a final "
+                            "answer. Increase the step limit or simplify the task."
+                        ),
+                        "messages": messages_to_dict(messages),
+                    },
                 )
 
-        return {"_stream_messages": stream_msgs}
+        return {}
 
     return _guard_out
 

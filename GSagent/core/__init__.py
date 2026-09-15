@@ -11,10 +11,7 @@ from GSagent.core.models import (
 )
 from GSagent.core.providers import create_chat_model
 from GSagent.core.prompts import PromptComponent
-from GSagent.core.truncation import ContextWindowLimiter, SessionCompactor
 
-# 面向图的新执行外壳（纯 langgraph，Phase 5 起 CLI/serve 唯一入口）。
-from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
 # 环境适配：跨终端探测/改写/执行（US2 FR-002）。
 from GSagent.core.env.terminal import (
     TerminalType,
@@ -27,11 +24,7 @@ from GSagent.core.models.result import ShellResult
 
 __all__ = [
     "ApprovalRequirement",
-    "SessionCompactor",
-    "ContextWindowLimiter",
     "ContextWindowUsage",
-    "GraphAgent",
-    "PauseRequest",
     "PromptComponent",
     "ShellResult",
     "StructuredToolResult",

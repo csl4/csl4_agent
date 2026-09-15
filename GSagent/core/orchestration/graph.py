@@ -18,6 +18,7 @@
 from typing import Any, Callable, Dict
 
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -25,7 +26,6 @@ from GSagent.core.observability import AgentEventType
 from GSagent.core.observability.telemetry import traced_node
 from GSagent.core.orchestration.nodes import (
     _emit,
-    _msg,
     agent_node,
     guard_in_node,
     guard_out_node,
@@ -33,7 +33,7 @@ from GSagent.core.orchestration.nodes import (
 )
 from GSagent.core.orchestration.state import GraphState
 from GSagent.core.tools.approval import wrap_all_with_approval
-from GSagent.utils.stream import StreamEvents
+from GSagent.utils.stream import StreamEvents, stream_custom
 
 
 def route_after_guard_in(state: Dict[str, Any]) -> str:
@@ -52,20 +52,19 @@ def _make_tool_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
     inner = ToolNode(tools)
 
     def _node(state: Dict[str, Any]) -> Dict[str, Any]:
-        stream_msgs: list[Dict[str, Any]] = []
+        writer = get_stream_writer()
         last_calls: list[Dict[str, Any]] = list(state.get("last_tool_calls") or [])
         tool_number: int = int(state.get("tool_number", 0))
         for tc in last_calls:
             tool_number += 1
-            stream_msgs.append(
-                _msg(
-                    StreamEvents.START_TOOL,
-                    {
-                        "tool_call_id": tc.get("id", ""),
-                        "tool_name": tc.get("name", "unknown"),
-                        "tool_number": tool_number,
-                    },
-                )
+            stream_custom(
+                writer,
+                StreamEvents.START_TOOL,
+                {
+                    "tool_call_id": tc.get("id", ""),
+                    "tool_name": tc.get("name", "unknown"),
+                    "tool_number": tool_number,
+                },
             )
             _emit(
                 loop,
@@ -79,15 +78,14 @@ def _make_tool_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
         known = {t.name for t in loop.tools_registry.get_all_tools()}
         for m in tool_msgs:
             m_name = getattr(m, "name", "")
-            stream_msgs.append(
-                _msg(
-                    StreamEvents.TOOL_RESULT,
-                    {
-                        "tool_call_id": getattr(m, "tool_call_id", ""),
-                        "tool_name": m_name,
-                        "content": str(m.content),
-                    },
-                )
+            stream_custom(
+                writer,
+                StreamEvents.TOOL_RESULT,
+                {
+                    "tool_call_id": getattr(m, "tool_call_id", ""),
+                    "tool_name": m_name,
+                    "content": str(m.content),
+                },
             )
             # 工具缺失 / 返回错误 → TOOL_ERROR 事件（事件流完整性）
             is_err = m_name not in known or str(m.content).startswith("Error")
@@ -103,7 +101,6 @@ def _make_tool_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
             )
         out["tool_number"] = tool_number
         out["last_tool_calls"] = []
-        out["_stream_messages"] = stream_msgs
         return out
 
     return _node

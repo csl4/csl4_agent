@@ -88,7 +88,7 @@
 | FR-CLI-02 | MUST 提供 `run`（单次执行）：`--prompt-file` / `--file` / `--json-output-file` / `--snapshot` / `--hitl`，支持管道 stdin 输入 | P0 | 001 |
 | FR-CLI-03 | MUST 提供 `serve`（FastAPI：线程/回合/SSE + 后台任务），`--host` / `--port` / `--hitl=never|auto` | P1 | 002 |
 | FR-CLI-04 | MUST 提供管理子命令：`toolset`（列出工具集）、`agents list`（多 Agent 角色）、`skills list/add/rm`、`history session/command/usage`、`tasks list/cancel`、`snapshot list/restore`、`eval run/baseline/list`、`version` | P1 | 001/002 |
-| FR-CLI-05 | MUST 保持命令行入口可用：`agent <command>`（console_scripts）；CLI 只消费 `StreamMessage` 事件流，不接触底层 Tool/Toolset 细节（宪法 II） | P0 | 本项目 |
+| FR-CLI-05 | MUST 保持命令行入口可用：`agent <command>`（console_scripts）；CLI 只消费 `run_graph_session()` 的 langgraph 原生流（custom 渲染事件 + `__interrupt__`），不接触底层 Tool/Toolset 细节（宪法 II） | P0 | 本项目 |
 | FR-CLI-06 | MUST 支持 `--multi-agent` / `--plan` / `--max-subagents` / `--hitl` 等模式开关 | P0 | 001/002 |
 
 ### 3.2 工具执行（`GSagent/core/tools/` + `plugins/toolsets/`）
@@ -113,7 +113,7 @@
 | FR-MA-05 | MUST 支持 `--max-subagents` 并行上限（默认 4），ThreadPoolExecutor 并行派发 | P0 | 001 |
 | FR-MA-06 | MUST A2A 协议对接开源 a2a-sdk（`core/a2a/protocol.py`），不自造协议轮子；`InProcessA2AClient` 进程内传输 | P0 | 001 |
 | FR-MA-07 | MUST 单个子任务失败不中断整体（`run_task_safe` 兜底），归并结果如实呈现失败 | P0 | 001 |
-| FR-MA-08 | MUST 多 Agent 事件并入 `StreamMessage` 流（`MULTI_AGENT_DECOMPOSE` / `MULTI_AGENT_SUBAGENT` / `MULTI_AGENT_DONE`），CLI 与 serve 复用同一消费路径 | P0 | 001 |
+| FR-MA-08 | MUST 多 Agent 事件并入 custom 流（`MULTI_AGENT_DECOMPOSE` / `MULTI_AGENT_SUBAGENT` / `MULTI_AGENT_DONE`），CLI 与 serve 复用同一消费路径 | P0 | 001 |
 
 ### 3.4 企业级安全策略层（`GSagent/core/policy/`）
 
@@ -142,7 +142,7 @@
 | FR-RT-01 | MUST `serve` 提供线程/回合/SSE 事件流 API（`POST /threads`、`POST /threads/{id}/messages`、`GET /threads/{id}/events`） | P2 | 002 FR-011 |
 | FR-RT-02 | MUST 提供持久化后台任务队列 `DurableTaskManager`（SQLite），支持投递/查询/取消，按项目目录 scope 隔离 | P2 | 002 FR-009 |
 | FR-RT-03 | MUST 任务队列保证原子领取、租约过期重排队（崩溃恢复）、取消后迟到结果不覆盖（canceled 优先） | P2 | 002 FR-010 |
-| FR-RT-04 | MUST serve 与 CLI 一样只消费 `StreamMessage` 事件流（宪法 II） | P2 | 002 |
+| FR-RT-04 | MUST serve 与 CLI 一样只消费 langgraph 原生流（custom 渲染事件 + `__interrupt__`，宪法 II） | P2 | 002 |
 
 ### 3.7 记忆系统（`GSagent/core/memory/`）
 
@@ -218,7 +218,7 @@
 |---|---|---|
 | NFR-REL-01 | 后台任务崩溃恢复：worker 被杀后任务 ≤租约期自动重排队；取消后迟到结果 0 例覆盖 canceled（SC-006，002） | 002 |
 | NFR-REL-02 | 命令失败时基于上下文自动重试/调整方案，最终回复说明失败与恢复（FR-010，001） | 001 |
-| NFR-REL-03 | 会话上下文超限时压缩而非丢弃关键信息（FR-009，001；`SessionCompactor`/`ContextWindowLimiter`） | 001 |
+| NFR-REL-03 | 会话上下文超限时压缩而非丢弃关键信息（FR-009，001；`maybe_summarize` 旧消息 LLM 摘要） | 001 |
 
 ### 4.4 兼容性
 
@@ -253,7 +253,7 @@
 | 段 | 说明 |
 |---|---|
 | `llm` | model / api_key / base_url |
-| `agent` | max_steps / global_instructions / enable_compaction / compaction_threshold_ratio / compaction_keep_last_n / record_usage |
+| `agent` | max_steps / global_instructions / record_usage |
 | `policy` | hitl_mode / workspace_root / command_blacklist / command_allowlist / audit_dir / snapshot_dir / approval_window_sec |
 | `runtime` | queue_db / serve_port |
 | `cost` | pricing（`{model: {prompt_per_1k, completion_per_1k}}`） |

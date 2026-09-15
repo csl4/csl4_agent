@@ -40,8 +40,13 @@ from GSagent.core.policy import (
     OutputGuard,
     PathGuard,
 )
-from GSagent.core.agents.graph_agent import GraphAgent
+from GSagent.core.agents.runtime import (
+    AgentRuntime,
+    _external_graph_input,
+    _single_graph_input,
+)
 from GSagent.core.memory.saver import create_saver, create_store
+from GSagent.core.orchestration.graph import build_graph_agent
 from GSagent.core.orchestration.multi import build_multi_agent_graph
 from GSagent.core.orchestration.plan import build_plan_graph
 from GSagent.core.orchestration.workers import (
@@ -63,9 +68,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "agent": {
         "max_steps": 20,
         "global_instructions": "",
-        "enable_compaction": True,
-        "compaction_threshold_ratio": 0.75,
-        "compaction_keep_last_n": 6,
         "record_usage": True,  # 企业级：是否记录用量/成本（FR-007）
     },
     # 企业级安全策略层（002-enterprise-cli-upgrade，contracts/config.md）。
@@ -290,7 +292,6 @@ class Config:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         max_steps: Optional[int] = None,
-        no_compaction: bool = False,
         hitl: Optional[str] = None,
         workspace_root: Optional[str] = None,
     ) -> None:
@@ -306,8 +307,6 @@ class Config:
             self.data["llm"]["base_url"] = base_url
         if max_steps:
             self.data["agent"]["max_steps"] = max_steps
-        if no_compaction:
-            self.data["agent"]["enable_compaction"] = False
         if hitl:
             self.data["policy"]["hitl_mode"] = hitl
         if workspace_root:
@@ -413,8 +412,8 @@ class Config:
         path = (self.data.get("memory") or {}).get("store_db")
         return create_store(path)
 
-    def _graph_agent_kwargs(self, *, registry: ToolRegistry) -> Dict[str, Any]:
-        """GraphAgent 共享注入（HITL/审计/成本/可观测/护栏）。"""
+    def _runtime_kwargs(self, *, registry: ToolRegistry) -> Dict[str, Any]:
+        """AgentRuntime 共享注入（HITL/审计/成本/可观测/护栏）。"""
         _, _, hitl_policy, audit_log = self.policy_components()
         return {
             "tools_registry": registry,
@@ -450,23 +449,30 @@ class Config:
         *,
         checkpointer: Optional[Any] = None,
         store: Optional[Any] = None,
-    ) -> GraphAgent:
-        """装配单 Agent GraphAgent（新图：ToolNode + 审批下沉 + SqliteSaver/store）。"""
+    ) -> AgentRuntime:
+        """装配单 Agent runtime（新图：ToolNode + 审批下沉 + SqliteSaver/store）。"""
         registry = tools_registry or self.create_tools_registry()
         chat_model = chat_model or create_chat_model(
             self.data["llm"], tools=registry.get_all_tools()
         )
         agent_config = self.data["agent"]
-        return GraphAgent(
+        runtime = AgentRuntime(
+            kind="single",
+            agent_id="main",
             chat_model=chat_model,
-            checkpointer=checkpointer,
-            store=store,
+            model_name=(
+                getattr(chat_model, "model_name", "")
+                or getattr(chat_model, "model", "")
+                or "chat-model"
+            ),
             max_steps=agent_config.get("max_steps", 20),
-            enable_compaction=agent_config.get("enable_compaction", True),
-            compaction_threshold_ratio=agent_config.get("compaction_threshold_ratio", 0.75),
-            compaction_keep_last_n=agent_config.get("compaction_keep_last_n", 6),
-            **self._graph_agent_kwargs(registry=registry),
+            build_input=_single_graph_input,
+            **self._runtime_kwargs(registry=registry),
         )
+        runtime.graph = build_graph_agent(
+            runtime, checkpointer=checkpointer, store=store
+        )
+        return runtime
 
     def create_multi_graph_agent(
         self,
@@ -474,8 +480,8 @@ class Config:
         checkpointer: Optional[Any] = None,
         store: Optional[Any] = None,
         max_subagents: Optional[int] = None,
-    ) -> GraphAgent:
-        """装配多 Agent GraphAgent（create_agent 主编排图：decompose → Send 并行）。"""
+    ) -> AgentRuntime:
+        """装配多 Agent runtime（create_agent 主编排图：decompose → Send 并行）。"""
         settings = self.multi_agent_settings()
         if max_subagents is not None:
             settings["max_subagents"] = max_subagents
@@ -498,7 +504,13 @@ class Config:
             checkpointer=checkpointer,
             store=store,
         )
-        return GraphAgent(graph=graph, **self._graph_agent_kwargs(registry=registry))
+        return AgentRuntime(
+            graph=graph,
+            kind="multi",
+            agent_id="main",
+            build_input=_external_graph_input,
+            **self._runtime_kwargs(registry=registry),
+        )
 
     def create_plan_graph_agent(
         self,
@@ -506,8 +518,8 @@ class Config:
         checkpointer: Optional[Any] = None,
         store: Optional[Any] = None,
         max_subagents: Optional[int] = None,
-    ) -> GraphAgent:
-        """装配 Plan-and-Execute GraphAgent（Plan 图：批次 Send 并行）。"""
+    ) -> AgentRuntime:
+        """装配 Plan-and-Execute runtime（Plan 图：批次 Send 并行）。"""
         registry = self.create_tools_registry()
         llm_cfg = dict(self.data.get("llm") or {})
         planner_llm = create_chat_model(llm_cfg)  # 规划
@@ -521,6 +533,12 @@ class Config:
             checkpointer=checkpointer,
             store=store,
         )
-        return GraphAgent(graph=graph, **self._graph_agent_kwargs(registry=registry))
+        return AgentRuntime(
+            graph=graph,
+            kind="plan",
+            agent_id="main",
+            build_input=_external_graph_input,
+            **self._runtime_kwargs(registry=registry),
+        )
 
 

@@ -2,6 +2,8 @@
 
 > 来源：`spec.md` FR-001/008 ｜ 设计：`research.md` R-01/R-05 ｜ 数据模型：`data-model.md` §1/§4
 
+> **后续简化（拆壳）**：外部消费方已不再用 `StreamMessage` 对象——渲染事件改经 langgraph custom 流（`{"type","data"}` dict），SSE 序列化收敛为 `event_to_sse()`（`GSagent/utils/stream.py`）。本契约的 dict↔BaseMessage 转换层（`GSagent/core/llm_adapter.py`）仍有效。
+
 ## 目的
 
 定义编排内部 `BaseMessage` 世界与既有外部消费方（StreamMessage SSE 事件、审计、截断）的转换契约。**外部输出形态不变**（FR-007/008）。

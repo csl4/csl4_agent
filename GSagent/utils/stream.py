@@ -1,27 +1,21 @@
-"""供 agent 主循环使用的 SSE（Server-Sent Events）流消息定义。"""
+"""agent 主循环的事件协议（拆壳后：langgraph custom 流事件）。
 
+节点经 ``langgraph.config.get_stream_writer()`` 推送自定义事件（``stream_custom``），
+CLI/serve 直接消费 ``graph.stream(..., stream_mode="custom")`` 流里的
+``{"type": <StreamEvents.value>, "data": {...}}`` 字典。SSE 序列化收敛为
+``event_to_sse``。
 
-# ======================= 中文导览 =======================
-# 本文件定义主循环对外的【事件协议】：
-#   StreamEvents  → 事件枚举：ANSWER_DELTA(打字机式吐字) / START_TOOL / TOOL_RESULT /
-#                    ANSWER_END(最终答案) / APPROVAL_REQUIRED(审批暂停) / FRONTEND_PAUSE /
-#                    COMPACTION_START / COMPACTED / ERROR 等。
-#   StreamMessage → 单个事件，带 to_sse() 转成 SSE 文本 `event:xxx\ndata:{json}\n\n`。
-# 多Agent 事件（T017，向后兼容）：MULTI_AGENT_DECOMPOSE(任务拆解) /
-#   MULTI_AGENT_SUBAGENT(SubAgent 启停/结果) / MULTI_AGENT_DONE(任务完成)。
-#   既有事件消费方无需改动 —— 新事件只是新增枚举成员（宪法 II）。
-# 数据流位置：ToolCallingLLM.call_stream() 逐个 yield StreamMessage；前端据此渲染/cli据此 print。
-# =========================================================
+多 Agent 事件（T017，向后兼容）：MULTI_AGENT_DECOMPOSE / MULTI_AGENT_SUBAGENT /
+MULTI_AGENT_DONE。Plan 事件（US3 T028）：PLAN / PLAN_TASK。摘要压缩事件：SUMMARY。
+"""
 
 import json
 from enum import Enum
 from typing import Any, Dict
 
-from pydantic import BaseModel
-
 
 class StreamEvents(str, Enum):
-    """agent 主循环期间发出的事件类型。"""
+    """agent 主循环期间发出的渲染事件类型（custom 事件 type 标签）。"""
 
     ANSWER_DELTA = "ai_answer_delta"
     ANSWER_END = "ai_answer_end"
@@ -31,8 +25,7 @@ class StreamEvents(str, Enum):
     AI_MESSAGE = "ai_message"
     APPROVAL_REQUIRED = "approval_required"
     TOKEN_COUNT = "token_count"
-    COMPACTION_START = "compaction_start"
-    COMPACTED = "compacted"
+    SUMMARY = "summary"  # 摘要式上下文压缩命中（data: old_count/new_count/current_tokens/max_tokens）
     FRONTEND_PAUSE = "frontend_pause"
     # ---- 多Agent 编排事件（T017，向后兼容新增）----
     MULTI_AGENT_DECOMPOSE = "multi_agent_decompose"
@@ -47,17 +40,17 @@ class StreamEvents(str, Enum):
     PLAN_TASK = "plan_task"
 
 
-class StreamMessage(BaseModel):
-    """agent 主循环发出的单条 SSE 格式消息。
+def stream_custom(writer: Any, event: StreamEvents, data: Dict[str, Any]) -> None:
+    """节点内经 ``get_stream_writer()`` 推送一条渲染事件。
 
-    示例 SSE 格式：
-        event: {event}\n
-        data: {json}\n\n
+    事件形态：``{"type": event.value, "data": data}``。
     """
+    writer({"type": event.value, "data": data})
 
-    event: StreamEvents
-    data: Dict[str, Any] = {}
 
-    def to_sse(self) -> str:
-        """格式化为 SSE 字符串。"""
-        return f"event: {self.event.value}\ndata: {json.dumps(self.data, default=str)}\n\n"
+def event_to_sse(ev: Dict[str, Any]) -> str:
+    """custom 事件 dict → SSE 文本 ``event:xxx\\ndata:{json}\\n\\n``。"""
+    return f"event: {ev.get('type', '')}\ndata: {json.dumps(ev.get('data', {}), default=str)}\n\n"
+
+
+__all__ = ["StreamEvents", "event_to_sse", "stream_custom"]
