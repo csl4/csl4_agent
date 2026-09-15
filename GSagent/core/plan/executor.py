@@ -23,72 +23,17 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Set
 from GSagent.core.a2a.client import A2AClientError, InProcessA2AClient
 from GSagent.core.agents.base_agent import BaseAgent, task_state_text
 from GSagent.core.agents.subagent import SubAgent
-from GSagent.core.plan.planner import PlanTask, compute_batches
-from GSagent.core.tools import ToolExecutor
+from GSagent.core.plan.planner import (
+    PlanRunResult,
+    PlanTask,
+    PlanTaskResult,
+    compute_batches,
+    merge_plan_results,
+)
+from GSagent.core.tools.registry import ToolRegistry
 from GSagent.utils.stream import StreamEvents, StreamMessage
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PlanTaskResult:
-    """单个子任务的执行结果（失败定位的最小单位）。"""
-
-    task_id: str
-    description: str
-    state: str  # completed / failed / skipped
-    result: str
-    batch: int
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "task_id": self.task_id,
-            "description": self.description,
-            "status": self.state,
-            "result": self.result,
-            "batch": self.batch,
-        }
-
-
-@dataclass
-class PlanRunResult:
-    """一次计划执行的整体结果。"""
-
-    tasks: List[PlanTask]
-    batches: List[List[str]]
-    results: Dict[str, PlanTaskResult]
-
-    def failed_tasks(self) -> List[PlanTaskResult]:
-        """未成功（failed/skipped）的子任务，按 task_id 输入序。"""
-        order = [t.id for t in self.tasks]
-        return [self.results[i] for i in order if self.results.get(i) and self.results[i].state != "completed"]
-
-
-def merge_plan_results(run: PlanRunResult) -> str:
-    """把计划执行结果归并为结构化回复（含批次明细 + 失败定位）。"""
-    lines = [
-        f"计划执行完成：共 {len(run.tasks)} 个子任务，{len(run.batches)} 个批次。"
-    ]
-    for batch_index, batch in enumerate(run.batches):
-        lines.append(f"批次 {batch_index + 1}（{len(batch)} 个）:")
-        for tid in batch:
-            res = run.results.get(tid)
-            if res is None:
-                continue
-            lines.append(f"  [{res.state}] 任务 {tid} · {res.description}")
-            result = (res.result or "").strip()
-            if result:
-                lines.append(f"      → {result}")
-    failed = run.failed_tasks()
-    lines.append("")
-    if not failed:
-        lines.append("整体结论: 全部子任务成功完成。")
-    else:
-        ids = ", ".join(r.task_id for r in failed)
-        lines.append(
-            f"整体结论: {len(failed)} 个子任务未成功（{ids}），详见上方。"
-        )
-    return "\n".join(lines)
 
 
 class PlanExecutor:
@@ -96,13 +41,13 @@ class PlanExecutor:
 
     def __init__(
         self,
-        tool_executor: ToolExecutor,
+        tools_registry: ToolRegistry,
         max_subagents: int = 4,
         worker_factory: Optional[Callable[[str], BaseAgent]] = None,
         parent: Optional[BaseAgent] = None,
         name: str = "plan",
     ) -> None:
-        self.tool_executor = tool_executor
+        self.tools_registry = tools_registry
         self.max_subagents = max_subagents
         self.parent = parent
         self.name = name
@@ -113,7 +58,7 @@ class PlanExecutor:
     def _default_worker(self, agent_id: str) -> BaseAgent:
         return SubAgent(
             agent_id=agent_id,
-            tool_executor=self.tool_executor,
+            tools_registry=self.tools_registry,
             name=f"plan-{agent_id}",
             parent=self.parent,
         )

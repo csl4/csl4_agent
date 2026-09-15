@@ -117,6 +117,18 @@ def compute_batches(tasks: List[PlanTask]) -> List[List[str]]:
     return batches
 
 
+def _planner_text(llm: Any, messages: List[Dict[str, Any]]) -> str:
+    """兼容 BaseChatModel（invoke）与旧 LLM（completion）取规划文本。"""
+    invoke = getattr(llm, "invoke", None)
+    if invoke is not None:
+        from GSagent.core.llm_adapter import dict_to_messages
+
+        response = invoke(dict_to_messages(messages))
+        return (getattr(response, "content", "") or "").strip()
+    response = llm.completion(messages)
+    return (response.content or "").strip()
+
+
 def plan_with_llm(
     llm: Any,
     user_input: str,
@@ -124,18 +136,19 @@ def plan_with_llm(
 ) -> List[PlanTask]:
     """经 LLM 规划用户任务为子任务 DAG。
 
-    调用方传入实现了 ``completion(messages) -> ModelResponse`` 的 LLM
-    （鸭子类型，与 Orchestrator._plan_with_llm 一致）。
+    调用方传入 langchain ``BaseChatModel``（invoke）或实现了
+    ``completion(messages) -> ModelResponse`` 的旧 LLM（鸭子类型，与
+    Orchestrator._plan_with_llm 一致）。
     抛 PlanError：LLM 调用失败 / 输出不可解析 / 规划为空。
     """
     try:
-        response = llm.completion(
+        content = _planner_text(
+            llm,
             [
                 {"role": "system", "content": system_prompt or PLANNER_SYSTEM_PROMPT},
                 {"role": "user", "content": user_input or "(空任务)"},
-            ]
+            ],
         )
-        content = (response.content or "").strip()
     except Exception as exc:  # noqa: BLE001 - 规划失败收敛为 PlanError
         raise PlanError(f"规划 LLM 调用失败: {exc}") from exc
     tasks = parse_plan_json(content)
@@ -144,11 +157,82 @@ def plan_with_llm(
     return tasks
 
 
+# ---- 执行结果模型（纯 langgraph 重构 Phase 4：从 executor.py 上移，供 Plan 图复用）----
+
+
+@dataclass
+class PlanTaskResult:
+    """单个子任务的执行结果（失败定位的最小单位）。"""
+
+    task_id: str
+    description: str
+    state: str  # completed / failed / skipped
+    result: str
+    batch: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "description": self.description,
+            "status": self.state,
+            "result": self.result,
+            "batch": self.batch,
+        }
+
+
+@dataclass
+class PlanRunResult:
+    """一次计划执行的整体结果。"""
+
+    tasks: List[PlanTask]
+    batches: List[List[str]]
+    results: Dict[str, PlanTaskResult]
+
+    def failed_tasks(self) -> List[PlanTaskResult]:
+        """未成功（failed/skipped）的子任务，按 task_id 输入序。"""
+        order = [t.id for t in self.tasks]
+        return [
+            self.results[i]
+            for i in order
+            if self.results.get(i) and self.results[i].state != "completed"
+        ]
+
+
+def merge_plan_results(run: PlanRunResult) -> str:
+    """把计划执行结果归并为结构化回复（含批次明细 + 失败定位）。"""
+    lines = [
+        f"计划执行完成：共 {len(run.tasks)} 个子任务，{len(run.batches)} 个批次。"
+    ]
+    for batch_index, batch in enumerate(run.batches):
+        lines.append(f"批次 {batch_index + 1}（{len(batch)} 个）:")
+        for tid in batch:
+            res = run.results.get(tid)
+            if res is None:
+                continue
+            lines.append(f"  [{res.state}] 任务 {tid} · {res.description}")
+            result = (res.result or "").strip()
+            if result:
+                lines.append(f"      → {result}")
+    failed = run.failed_tasks()
+    lines.append("")
+    if not failed:
+        lines.append("整体结论: 全部子任务成功完成。")
+    else:
+        ids = ", ".join(r.task_id for r in failed)
+        lines.append(
+            f"整体结论: {len(failed)} 个子任务未成功（{ids}），详见上方。"
+        )
+    return "\n".join(lines)
+
+
 __all__ = [
     "PLANNER_SYSTEM_PROMPT",
     "PlanError",
+    "PlanRunResult",
     "PlanTask",
+    "PlanTaskResult",
     "compute_batches",
+    "merge_plan_results",
     "parse_plan_json",
     "plan_with_llm",
 ]
