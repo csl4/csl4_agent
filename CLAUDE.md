@@ -23,7 +23,7 @@ ruff check --fix
 mypy
 ```
 
-**注意**：当前仓库正处于 `agent/` → `GSagent/` 的迁移中，`tests/` 目录已从 git 中移除（磁盘上暂不存在），`pyproject.toml` 的 `testpaths` 仍指向 `tests`。恢复测试目录（镜像 `GSagent/` 结构）后上述命令生效；迁移完成前请勿据 `tests/` 的缺失判断代码不可测。
+**注意**：langchain 生态迁移（002-langchain-ecosystem）已完成：`tests/` 已恢复（磁盘上 24 个测试文件，`agent/`→`GSagent/` 路径迁移中新增的迁移测试一并就位），非 LLM 测试当前全绿；`pyproject.toml` 的 `testpaths` 指向 `tests` 正常生效。LLM 相关测试需配 `AGENT_API_KEY` 后运行。
 
 **uv 说明**：依赖管理用 uv 的 pip 兼容接口（`uv pip`），目标是**当前激活的环境**（本机为 conda `base_llm`），不建 `.venv`。本机 base_llm 的 site-packages 对普通用户只读，首次安装前需在管理员 PowerShell 授权一次：`icacls "D:\anaconda\envs\base_llm\Lib\site-packages" /grant "%USERNAME%:(OI)(CI)M"`。依赖声明在 `pyproject.toml`（PEP 621 `[project]` + `[project.optional-dependencies]`，可选组 `dev` / `server`），不要用 Poetry 格式。
 
@@ -34,12 +34,12 @@ mypy
 | 模块 | 路径 | 职责 |
 |---|---|---|
 | CLI 入口 | `GSagent/main.py` | 命令路由、配置加载（`run`/`chat`/`serve`/`toolset`/`agents`/`skills`/`history`/`tasks`/`snapshot`/`eval`/`version`） |
-| 配置 | `GSagent/config.py` | 组合根：`create_llm` / `create_tool_executor` / `create_tool_calling_llm` / `policy_components` / `create_cost_estimator`；四层覆盖（默认←YAML←环境变量←CLI） |
-| 核心引擎 | `GSagent/core/` | ToolCallingLLM 外壳（`core/agents/tool_calling_llm.py`，外部契约不变）、LangGraph 编排层（`core/orchestration/`：state/graph/nodes，宪法 3.2 显式图）、langchain 工具注册表（`core/tools/registry.py`，@tool + 守卫/审批包装 + 动态审批）、多Agent 角色、A2A、提示词、截断、LLM 装配（`core/providers/factory.py`，ChatOpenAI） |
-| 安全策略 | `GSagent/core/policy/` | PathGuard / CommandGuard / HitlPolicy / AuditLog + 输入/输出侧 Guardrail（`input_guard.py` / `output_guard.py`，宪法 11.1 三道 Guardrail），注入 ToolExecutor 与 ToolCallingLLM |
-| Plan-and-Execute | `GSagent/core/plan/` | LLM 产出任务 DAG，按依赖拓扑批次并行执行，失败定位 |
+| 配置 | `GSagent/config.py` | 组合根：`create_single_graph_agent` / `create_multi_graph_agent` / `create_plan_graph_agent` / `create_tools_registry` / `create_saver` / `create_store` / `policy_components` / `create_cost_estimator`；四层覆盖（默认←YAML←环境变量←CLI） |
+| 核心引擎 | `GSagent/core/` | 纯 langgraph 执行：`GraphAgent` 外壳（`core/agents/graph_agent.py`，CLI/serve 唯一入口，`stream()` 产 StreamMessage 渲染事件 + PauseRequest 暂停，per-interrupt-id resume）、单 Agent 图（`core/orchestration/graph.py` build_graph_agent：guard_in/agent/ToolNode/guard_out）、多 Agent 主编排图（`core/orchestration/multi.py`：decompose → Send 并行 → create_agent worker 子图 → finalize）、Plan 图（`core/orchestration/plan.py`：批次 Send 并行）、create_agent worker 工厂（`core/orchestration/workers.py`）、审批下沉包装（`core/tools/approval.py`，interrupt 进 @tool）、langchain 工具注册表（`core/tools/registry.py`，@tool + 守卫 + 动态审批）、提示词、截断、LLM 装配（`core/providers/factory.py`，ChatOpenAI） |
+| 安全策略 | `GSagent/core/policy/` | PathGuard / CommandGuard / HitlPolicy / AuditLog + 输入/输出侧 Guardrail（`input_guard.py` / `output_guard.py`，宪法 11.1 三道 Guardrail），注入 ToolRegistry 与 GraphAgent |
+| Plan-and-Execute | `GSagent/core/orchestration/plan.py` | LLM 产出任务 DAG（`core/plan/planner.py` 复用），按依赖批次 Send 并行执行，失败定位 |
 | 运行时 | `GSagent/core/runtime/` | `serve`（FastAPI：线程/回合/SSE）+ SQLite 持久化任务队列（原子租约、取消保护、崩溃恢复） |
-| 记忆系统 | `GSagent/core/memory/` | 长期记忆（SQLite `MemoryStore`，跨会话按 scope）+ 会话记忆目录（`SessionMemoryStore` 每轮落盘） |
+| 记忆系统 | `GSagent/core/memory/` | 长期记忆业务语义（`langgraph_store.py` `StoreMemoryAdapter` over langgraph BaseStore：namespace=(user,scope)、content_hash 去重、离线打分召回、LRU 配额、user 隔离；`saver.py` SqliteSaver/SqliteStore 工厂）+ 会话记忆目录（`SessionMemoryStore` 每轮落盘，主路径由 checkpointer 持久化） |
 | 评估体系 | `GSagent/core/eval/` | 三指标（完成率/幻觉率/误拒绝率）+ 基线回归 + 错误案例回流，`OfflineLLM` 离线回归 |
 | 快照 / 成本 | `GSagent/core/` | `snapshot.py`（执行前后自动快照）、`cost.py`（本地定价成本估算） |
 | 终端适配 | `GSagent/core/env/terminal.py` | PowerShell / bash / zsh 探测与命令改写 |
@@ -67,10 +67,10 @@ chat 内斜杠命令：`/exit` `/hitl <mode>` `/remember <内容>` `/memory [que
 
 ### Key Patterns
 
-- **插件架构**：每个工具集以 langchain `@tool` 装饰器定义（`lc_tools.py`），工厂 `create_xxx_tools(config)` 返回 `@tool` 列表；`Config.create_tools_registry()` 注册进 `ToolRegistry`（含守卫/审批包装）；bash/sandbox 的**动态审批**（`validate_command` 三态）经工具返回值信号 + 编排 `interrupt()` 处理；核心引擎不依赖具体工具细节
-- **组合根**：`Config` 是唯一装配点，`main.py` 只从这里拿拼好的对象（构造函数注入，不内部 new）；CLI 只消费 `StreamMessage` 事件流，不接触底层 Tool/Toolset（宪法 II）
+- **插件架构**：每个工具集以 langchain `@tool` 装饰器定义（`lc_tools.py`），工厂 `create_xxx_tools(config)` 返回 `@tool` 列表；`Config.create_tools_registry()` 注册进 `ToolRegistry`（含守卫包装）；bash/sandbox 的**动态审批**经 `approval.py` 的 `wrap_with_approval` **审批下沉进 @tool**（`interrupt()` 人在回环，per-interrupt-id resume，任何 ToolNode/create_agent 复用同一套审批）
+- **组合根**：`Config` 是唯一装配点，`main.py` 只从这里拿拼好的对象（构造函数注入，不内部 new）；CLI/serve 只消费 `GraphAgent.stream()` 的 `StreamMessage`（渲染）+ `PauseRequest`（审批暂停）流，不接触底层 Tool/图细节（宪法 II）
 - **配置向后兼容**：重命名字段时用 Pydantic `extra="allow"` + `model_validator` 映射旧名，不在 schema 中保留废弃字段（宪法 III；当前 `config.py` 用 dict + `_deep_merge`，尚未迁移 Pydantic，见 docs/implementation-notes.md）
-- **类层次结构**：新增字段/方法时放在最通用的层级（如 `BaseAgent` 承载公共编排行为），不要因 issue 提到特定子类就限缩范围（宪法 V）
+- **类层次结构**：新增字段/方法时放在最通用的层级（公共编排行为承载于 `GraphAgent` / 各图节点工厂），不要因 issue 提到特定子类就限缩范围（宪法 V）
 - **重试**：使用 `tenacity` 库，不要手写重试循环
 - **企业级安全**：策略组件（path/command 守卫 + HITL 三态 + 审计）由 `Config.policy_components()` 统一构建并注入，HITL 支持运行时 `/hitl` 切换；审计 JSONL 全量留痕且密钥脱敏
 
@@ -90,7 +90,7 @@ chat 内斜杠命令：`/exit` `/hitl <mode>` `/remember <内容>` `/memory [que
   - `AGENT_API_KEY`（回退 `OPENAI_API_KEY`）、`AGENT_MODEL`、`AGENT_BASE_URL`
   - `AGENT_MAX_STEPS`、`AGENT_MULTI_AGENT`（bool）、`AGENT_MAX_SUBAGENTS`
   - `AGENT_HITL_MODE`（auto|always|never）、`AGENT_WORKSPACE_ROOT`、`AGENT_RECORD_USAGE`、`AGENT_SERVE_PORT`
-  - `AGENT_MEMORY_DB`、`AGENT_MEMORY_SESSIONS_DIR`、`AGENT_MEMORY_SCOPE`、`AGENT_MEMORY_USER`（记忆系统，见 `docs/memory.md`；`user` 默认系统登录用户，多用户隔离）
+  - `AGENT_MEMORY_DB`、`AGENT_MEMORY_SESSIONS_DIR`、`AGENT_MEMORY_SCOPE`、`AGENT_MEMORY_USER`（记忆系统，见 `docs/memory.md`；`user` 默认系统登录用户，多用户隔离）；`AGENT_MEMORY_CHECKPOINT_DB` / `AGENT_MEMORY_STORE_DB`（纯 langgraph：SqliteSaver 会话/断点持久化 + SqliteStore 长期记忆底层，见 `core/memory/saver.py`）
   - `AGENT_LOG_LEVEL`、`AGENT_LOG_FILE`、`AGENT_LOG_DIR`（日志，见 `GSagent/common/env_vars.py` —— 只放 Config 无归属的 import 期常量，模型/key 等配置不要在此重复声明）
   - `AGENT_OTEL_ENABLED` / `AGENT_OTEL_ENDPOINT` / `AGENT_OTEL_SERVICE_NAME` / `AGENT_OTEL_TRACE_CONTENT`（可观测，`observability` 段）、`AGENT_GUARDRAIL_INPUT` / `AGENT_GUARDRAIL_OUTPUT`（护栏开关，`guardrails` 段）
 

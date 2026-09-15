@@ -122,6 +122,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "user": "",  # 用户维度；空=自动系统登录用户（004-memory-isolation）
         "max_entries": 500,  # 每 scope 记忆配额，LRU 清理
         "ttl_days": 0,  # 记忆 TTL（天）；0=不启用
+        # 纯 langgraph（Phase 5）：SqliteSaver / SqliteStore 路径；空=./.GSagent/ 默认
+        "checkpoint_db": "",
+        "store_db": "",
     },
     # Per-toolset config sections; see each toolset's config class for fields.
     "bash": {},
@@ -199,6 +202,9 @@ _ENV_OVERRIDES: List[Tuple[str, Any, Callable[[str, Any], Any]]] = [
     ("memory.sessions_dir", "AGENT_MEMORY_SESSIONS_DIR", _env_str),
     ("memory.scope", "AGENT_MEMORY_SCOPE", _env_str),
     ("memory.user", "AGENT_MEMORY_USER", _env_str),
+    # 纯 langgraph（Phase 5）：SqliteSaver / SqliteStore 路径（空=./.GSagent/ 默认）
+    ("memory.checkpoint_db", "AGENT_MEMORY_CHECKPOINT_DB", _env_str),
+    ("memory.store_db", "AGENT_MEMORY_STORE_DB", _env_str),
     # 可观测（001-langgraph-otel-refactor，contracts/observability.md）
     ("observability.enabled", "AGENT_OTEL_ENABLED", _env_bool),
     ("observability.otlp_endpoint", "AGENT_OTEL_ENDPOINT", _env_str),
@@ -368,7 +374,12 @@ class Config:
         chat_model: Optional[Any] = None,
         tools_registry: Optional[ToolRegistry] = None,
     ) -> ToolCallingLLM: #
-        """根据配置创建 ToolCallingLLM 实例（002-langchain-ecosystem：chat_model + ToolRegistry）。
+        """根据配置创建 ToolCallingLLM 实例（旧执行路径，纯 langgraph 重构后保留兼容）。
+
+        .. deprecated:: Phase 5
+            新执行路径用 ``create_single_graph_agent`` / ``create_multi_graph_agent`` /
+            ``create_plan_graph_agent``（GraphAgent + 纯 LangGraph 图）。本方法仅供
+            旧测试/兼容消费点使用，新代码请迁移到 GraphAgent。
 
         参数:
             chat_model: 可选的预先装配的 BaseChatModel（缺省按 llm 配置 + 全工具 bind_tools）。

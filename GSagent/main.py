@@ -6,11 +6,13 @@
 #   命令：run(单次) / chat(交互) / serve(占位) / toolset(列出工具集) /
 #         agents list / skills list|add|rm / history session|command / version。
 # 关键流程：
-#   Config → create_tools_registry/create_tool_calling_llm（装配）
+#   Config → create_single_graph_agent / create_multi_graph_agent /
+#            create_plan_graph_agent（纯 langgraph 装配，SqliteSaver 持久化）
 #   build_chat_messages → 构造 messages
-#   _run_turn() → 循环跑 call_stream()，解析 StreamMessage 事件并打印；
-#                 遇 APPROVAL_REQUIRED 就弹出审批交互，收集 tool_decisions 后 resume。
-# 设计要点：CLI 只见 StreamMessage 事件流，不接触底层 Tool/Toolset 细节 —— 解耦清晰。
+#   _run_turn() → 循环消费 GraphAgent.stream()：StreamMessage 渲染 + PauseRequest
+#                 审批暂停（per-interrupt-id resume）。
+# 设计要点：CLI 只见 GraphAgent.stream() 的 StreamMessage/PauseRequest 流，
+# 不接触底层 Tool/图细节 —— 解耦清晰（宪法 II）。
 # =========================================================
 
 import json
@@ -177,8 +179,7 @@ def _consume_stream(
     resume_map: Optional[Dict[str, Dict[str, Any]]],
     session_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """执行一次 call_stream 遍历，边接收事件边打印。
-    对于返回数据的处理 也是agent生成器 消费器
+    """执行一次 GraphAgent.stream 遍历，边接收事件边打印（图消费器）。
 
     参数:
         session_id: 会话 ID，随 request_context 传入以便审计事件按会话聚合
@@ -186,7 +187,7 @@ def _consume_stream(
 
     返回:
         (final, pause)：final 是回合完成时的 ANSWER_END 数据；
-        当流因等待用户输入而暂停时设置 pause，包含键
+        当流因等待用户输入而暂停时设置 pause，含
         kind（'approval'|'frontend'）、tool_name、tool_call_id、messages。
     """
     final: Optional[Dict[str, Any]] = None
@@ -302,7 +303,7 @@ def _run_turn(
     """运行整个会话：循环消费流事件，途中解决审批/前端暂停。
 
     参数:
-        agent: ToolCallingLLM 实例。
+        agent: GraphAgent 实例。
         messages: 本轮请求的初始消息。
         can_prompt: 是否可以向用户交互式询问决策。
         session_id: 会话 ID，透传给 _consume_stream 供审计按会话聚合。
