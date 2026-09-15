@@ -1,77 +1,16 @@
 """测试共享辅助（离线打桩，不走 HTTP）。
 
-宪法 IV：离线测试用 ScriptedLLM 打桩，不走真实 API（无需 responses）。
-``ScriptedLLM`` 按预设 ``ModelResponse`` 序列依次响应，供编排图 / 主循环测试
-验证调度逻辑（tests/unit/orchestration/test_call_stream_contract.py 等）。
+宪法 IV：离线测试用 ``FakeChatLLM``（langchain ``BaseChatModel``）打桩，不走真实
+API（无需 responses）。旧 ``ScriptedLLM``（自研 LLM 接口）已随
+002-langchain-ecosystem 迁移移除（T029）。
 """
 
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import Field
-
-from GSagent.core.models import ContextWindowUsage
-from GSagent.core.providers import LLM, ModelResponse
-
-
-class ScriptedLLM(LLM):
-    """按脚本化响应序列离线打桩的 LLM（不走 HTTP）。
-
-    用法::
-
-        llm = ScriptedLLM([ModelResponse(content="hi", usage=...),
-                           ModelResponse(tool_calls=[...])])
-    """
-
-    def __init__(self, responses: List[ModelResponse]) -> None:
-        super().__init__(model="scripted")
-        self._responses = list(responses)
-        self.calls = 0  # 已消费的响应数（供测试断言调用次数）
-
-    def completion(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: str = "auto",
-        temperature: float = 0.7,
-        stream: bool = False,
-        response_format: Optional[Dict[str, Any]] = None,
-        drop_params: bool = True,
-    ) -> ModelResponse:
-        idx = min(self.calls, len(self._responses) - 1)
-        self.calls += 1
-        return self._responses[idx]
-
-    def completion_stream(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: str = "auto",
-        temperature: float = 0.7,
-        response_format: Optional[Dict[str, Any]] = None,
-        drop_params: bool = True,
-    ) -> Generator[str, None, ModelResponse]:
-        response = self.completion(
-            messages, tools, tool_choice, temperature, response_format, drop_params
-        )
-        if response.content:
-            yield response.content
-        return response
-
-    def count_tokens(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> ContextWindowUsage:
-        return ContextWindowUsage(total_tokens=1)
-
-    def get_context_window_size(self) -> int:
-        return 128000
-
-    def get_maximum_output_token(self) -> int:
-        return 4096
+from pydantic import Field, PrivateAttr
 
 
 class FakeChatLLM(BaseChatModel):
@@ -80,14 +19,23 @@ class FakeChatLLM(BaseChatModel):
     按预设 ``AIMessage`` 序列依次响应，用于 langchain 化编排测试（走
     ``_generate``，不走 HTTP）。``AIMessage`` 可带 ``tool_calls`` 与
     ``response_metadata["token_usage"]`` 以验证工具调用与用量提取。
+
+    ``bind_tools`` 返回自身并记录绑定工具（离线打桩：不做真实 schema 绑定，
+    也不复制实例——保证 ``calls`` 计数仍落在同一对象上，供测试断言）。
     """
 
     responses: List[AIMessage] = Field(default_factory=list)
     calls: int = 0  # 已消费的响应数（供测试断言）
+    _bound_tools: List[Any] = PrivateAttr(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
         return "fake-chat"
+
+    def bind_tools(self, tools: List[Any], **kwargs: Any) -> "FakeChatLLM":
+        """离线打桩：记录工具并返回自身（create_agent 内部调用 bind_tools）。"""
+        self._bound_tools = list(tools)
+        return self
 
     def _generate(
         self,
@@ -101,4 +49,4 @@ class FakeChatLLM(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=self.responses[idx])])
 
 
-__all__ = ["ScriptedLLM", "FakeChatLLM"]
+__all__ = ["FakeChatLLM"]

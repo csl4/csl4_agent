@@ -7,7 +7,6 @@ requires-python = ">=3.10"
 dependencies = [
     "typer>=0.9,<1.0",
     "pydantic>=2.0,<3.0",
-    "litellm>=1.0",
     "tenacity>=8.0",
     "pyyaml>=6.0",
     "jinja2>=3.0",
@@ -17,11 +16,16 @@ dependencies = [
     "protobuf>=5.29.5",
     "langgraph-cli[inmem]>=0.4.31",
     "langgraph>=1.2.11",
-    # 可观测（001-langgraph-otel-refactor）：OpenLLMetry 自动埋点 LangGraph/litellm
+    # 可观测（001-langgraph-otel-refactor）：OpenLLMetry 自动埋点 LangGraph/ChatOpenAI
     "opentelemetry-instrumentation-langchain>=0.55",
-    "opentelemetry-instrumentation-litellm>=0.55",
     # langchain 生态（002-langchain-ecosystem）：ChatOpenAI 替换 LiteLLMProvider
     "langchain-openai>=0.3",
+    # 纯 langgraph 重构（GSDOC langgraph.graph / otel-langgraph）：
+    # langchain.agents.create_agent（多 Agent 官方构造器，运行在 LangGraph 之上）
+    "langchain>=1.0",
+    # SqliteSaver 持久化 checkpointer（会话/断点恢复）+ SqliteStore（长期记忆底层，
+    # 随 langgraph-checkpoint-sqlite 提供，无需独立 store 包）
+    "langgraph-checkpoint-sqlite>=2.0",
 ]
 
 [project.scripts]

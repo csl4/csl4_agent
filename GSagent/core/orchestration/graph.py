@@ -1,23 +1,31 @@
 """LangGraph StateGraph 组装与编译。
 
-拓扑（contracts/orchestration.md §2）：
-``START → guard_in → agent → should_continue ─┬─ tools ──┬─ agent（循环）``
-                                              │           └─ end → guard_out → END
-                                              └─ end → guard_out → END
+两套图：
+- ``build_graph``：既有图（手写 tools_node 审批，002-langchain-ecosystem 契约）。
+- ``build_graph_agent``：新图（Phase 1 纯 langgraph）——审批下沉到工具包装器
+  （``tools/approval.py``），工具执行用 ``langgraph.prebuilt.ToolNode``，
+  checkpointer/store 可注入（SqliteSaver / SqliteStore）。
 
-- ``agent`` 后 ``should_continue``：无工具调用/熔断/暂停 → end；否则 → tools。
-- ``tools`` 后 ``route_after_tools``：产生暂停（approval/frontend）→ end；否则回 agent 循环。
-- checkpointer：InMemorySaver 编译（图规范要求）；暂停恢复靠**下次 call_stream
-  以初始状态携带决策重入**，不依赖 checkpoint 恢复语义（R-03）。
+新图拓扑：
+``START → guard_in → agent → should_continue ─┬─ tools(ToolNode) ─ agent（循环）``
+                                              └─ guard_out → END
+
+- ``agent`` 后 ``should_continue``：无工具调用/熔断 → guard_out；否则 → tools。
+- ``tools`` 内审批/前端暂停由工具包装器 ``interrupt()`` 触发（人在回环），
+  恢复用 ``Command(resume={interrupt_id: {...}})``（per-interrupt-id）。
 """
 
 from typing import Any, Callable, Dict
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
+from GSagent.core.observability import AgentEventType
 from GSagent.core.observability.telemetry import traced_node
 from GSagent.core.orchestration.nodes import (
+    _emit,
+    _msg,
     agent_node,
     guard_in_node,
     guard_out_node,
@@ -25,6 +33,8 @@ from GSagent.core.orchestration.nodes import (
     tools_node,
 )
 from GSagent.core.orchestration.state import GraphState
+from GSagent.core.tools.approval import wrap_all_with_approval
+from GSagent.utils.stream import StreamEvents
 
 
 def route_after_guard_in(state: Dict[str, Any]) -> str:
@@ -33,7 +43,7 @@ def route_after_guard_in(state: Dict[str, Any]) -> str:
 
 
 def build_graph(loop: Any) -> Callable[..., Any]:
-    """组装并编译编排图。
+    """组装并编译既有编排图（手写 tools_node 审批，002 契约）。
 
     参数:
         loop: ToolCallingLLM 实例（节点复用其 LLM/工具执行/审计/压缩等能力）。
@@ -70,4 +80,112 @@ def build_graph(loop: Any) -> Callable[..., Any]:
     return builder.compile(checkpointer=InMemorySaver())
 
 
-__all__ = ["build_graph", "route_after_tools"]
+def _make_tool_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+    """新图 tools 节点：ToolNode 执行（审批下沉到工具包装器）。
+
+    发射 START_TOOL / TOOL_RESULT 渲染事件与 TOOL_CALL_START/END 业务事件。
+    """
+    tools = wrap_all_with_approval(
+        loop.tools_registry.get_all_tools(), registry=loop.tools_registry
+    )
+    inner = ToolNode(tools)
+
+    def _node(state: Dict[str, Any]) -> Dict[str, Any]:
+        stream_msgs: list[Dict[str, Any]] = []
+        last_calls: list[Dict[str, Any]] = list(state.get("last_tool_calls") or [])
+        tool_number: int = int(state.get("tool_number", 0))
+        for tc in last_calls:
+            tool_number += 1
+            stream_msgs.append(
+                _msg(
+                    StreamEvents.START_TOOL,
+                    {
+                        "tool_call_id": tc.get("id", ""),
+                        "tool_name": tc.get("name", "unknown"),
+                        "tool_number": tool_number,
+                    },
+                )
+            )
+            _emit(
+                loop,
+                AgentEventType.TOOL_CALL_START,
+                state=state,
+                message=f"tool start {tc.get('name', '')}",
+                payload={"tool": tc.get("name", ""), "tool_call_id": tc.get("id", "")},
+            )
+        out = inner.invoke(state)
+        tool_msgs = out.get("messages") or []
+        for m in tool_msgs:
+            stream_msgs.append(
+                _msg(
+                    StreamEvents.TOOL_RESULT,
+                    {
+                        "tool_call_id": getattr(m, "tool_call_id", ""),
+                        "tool_name": getattr(m, "name", ""),
+                        "content": str(m.content),
+                    },
+                )
+            )
+            _emit(
+                loop,
+                AgentEventType.TOOL_CALL_END,
+                state=state,
+                message=f"tool end {getattr(m, 'name', '')}",
+                payload={
+                    "tool": getattr(m, "name", ""),
+                    "tool_call_id": getattr(m, "tool_call_id", ""),
+                },
+            )
+        out["tool_number"] = tool_number
+        out["last_tool_calls"] = []
+        out["_stream_messages"] = stream_msgs
+        return out
+
+    return _node
+
+
+def build_graph_agent(
+    loop: Any,
+    *,
+    checkpointer: Any = None,
+    store: Any = None,
+) -> Callable[..., Any]:
+    """组装并编译新单 Agent 图（Phase 1 纯 langgraph）。
+
+    与 ``build_graph`` 的差异：
+    - tools 用 ``ToolNode``（审批已下沉到工具包装器，无手写审批分支）。
+    - checkpointer / store 可注入（默认 InMemorySaver / None）。
+
+    参数:
+        loop: 提供 LLM/工具/压缩/审计/可观测能力的对象（GraphAgent）。
+        checkpointer: langgraph checkpointer（SqliteSaver / InMemorySaver）。
+        store: langgraph store（长期记忆，可选）。
+    """
+    builder = StateGraph(GraphState)
+    tracer = getattr(loop, "_tracer", None)
+    builder.add_node("guard_in", traced_node(tracer, "guard_in")(guard_in_node(loop)))
+    builder.add_node("agent", traced_node(tracer, "agent")(agent_node(loop)))
+    builder.add_node("tools", traced_node(tracer, "tools")(_make_tool_node(loop)))
+    builder.add_node("guard_out", traced_node(tracer, "guard_out")(guard_out_node(loop)))
+
+    builder.add_edge(START, "guard_in")
+    builder.add_conditional_edges(
+        "guard_in",
+        route_after_guard_in,
+        {"agent": "agent", "end": "guard_out"},
+    )
+    builder.add_conditional_edges(
+        "agent",
+        make_should_continue(loop),
+        {"tools": "tools", "end": "guard_out"},
+    )
+    builder.add_edge("tools", "agent")
+    builder.add_edge("guard_out", END)
+
+    return builder.compile(
+        checkpointer=checkpointer or InMemorySaver(),
+        store=store,
+    )
+
+
+__all__ = ["build_graph", "build_graph_agent", "route_after_guard_in"]
