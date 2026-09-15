@@ -20,8 +20,13 @@ from GSagent.core.prompts.components import (
 def build_tools_description(toolsets: List[Any]) -> str:
     """构建可用工具的人类可读描述。
 
+    002-langchain-ecosystem 后工具为 langchain ``BaseTool``（``@tool`` 注册表）；
+    为兼容迁移期仍按旧 ``Toolset`` 传入的调用方，按鸭子类型分支渲染：
+    - 有 ``.args``（BaseTool）→ 按 name/description/args 渲染；
+    - 有 ``.tools``（旧 Toolset）→ 按旧工具清单渲染。
+
     参数:
-        toolsets: Toolset 对象列表。
+        toolsets: BaseTool 或 Toolset 对象列表。
 
     返回:
         描述所有可用工具的格式化字符串。
@@ -29,6 +34,17 @@ def build_tools_description(toolsets: List[Any]) -> str:
     lines: List[str] = []
 
     for toolset in toolsets:
+        args = getattr(toolset, "args", None)
+        if args is not None:
+            # langchain BaseTool（@tool 注册表）
+            name = getattr(toolset, "name", "tool")
+            desc = getattr(toolset, "description", "") or ""
+            lines.append(f"- **{name}**: {desc}")
+            params_desc = _format_langchain_args(args)
+            if params_desc:
+                lines.append(f"  Parameters: {params_desc}")
+            continue
+        # 旧 Toolset 兼容（迁移期）
         lines.append(f"## {toolset.name}")
         lines.append(toolset.description)
         lines.append("")
@@ -40,6 +56,18 @@ def build_tools_description(toolsets: List[Any]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _format_langchain_args(args: Dict[str, Any]) -> str:
+    """把 langchain BaseTool.args schema 渲染为可读参数串。"""
+    parts: List[str] = []
+    for name, prop in (args or {}).items():
+        if not isinstance(prop, dict):
+            continue
+        required = "(required)" if prop.get("required") else "(optional)"
+        desc = prop.get("description", "")
+        parts.append(f"{name} {required}: {desc}")
+    return ", ".join(parts)
 
 
 def _format_parameters(parameters: Dict[str, Any]) -> str:

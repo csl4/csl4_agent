@@ -1,9 +1,9 @@
-"""Bash 工具集——基于前缀校验的命令执行（Windows 上的 Git Bash）。"""
+"""Bash 工具集——基于前缀校验的命令执行（Windows 上的 Git Bash）。
 
-from GSagent.plugins.toolsets.bash.bash_toolset import (
-    RunBashCommand,
-    create_bash_toolset,
-)
+002-langchain-ecosystem 后以 ``@tool`` 定义（``lc_tools.py``）；本包仅保留
+配置与校验层导出（旧 ``RunBashCommand``/``create_bash_toolset`` 已移除，T029）。
+"""
+
 from GSagent.plugins.toolsets.bash.common.config import BashExecutorConfig
 from GSagent.plugins.toolsets.bash.validation import (
     validate_command,
@@ -11,7 +11,5 @@ from GSagent.plugins.toolsets.bash.validation import (
 
 __all__ = [
     "BashExecutorConfig",
-    "RunBashCommand",
-    "create_bash_toolset",
     "validate_command",
 ]

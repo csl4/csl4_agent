@@ -217,7 +217,21 @@ class GraphAgent:
                 cancel_event=cancel_event,
                 enable_tool_approval=True,
             )
-        yield from self._run_graph(stream_input, config, cancel_event)
+        _emit(
+            self,
+            AgentEventType.AGENT_START,
+            session_id=session_id,
+            message=AgentEventType.AGENT_START.value,
+        )
+        try:
+            yield from self._run_graph(stream_input, config, cancel_event)
+        finally:
+            _emit(
+                self,
+                AgentEventType.AGENT_END,
+                session_id=session_id,
+                message=AgentEventType.AGENT_END.value,
+            )
 
     def _run_graph(
         self,

@@ -4,12 +4,12 @@
   （case_id/actual/verdict/tags/run_id）。
 - run_eval：完整评估 = run_dataset + compute_metrics，返回报告 dict。
 - judge_actual：确定性判定器（空输出/拒绝措辞 → false_reject；
-  expected 命中 → pass；否则 hallucination）——离线 ScriptedLLM 与真实
+  expected 命中 → pass；否则 hallucination）——离线 OfflineLLM 与真实
   LLM 共用；企业验收时专家在 review_cases 回流修正（FR-013）。
 - 基线读写：load_baseline / save_baseline（baselines/*.json，SC-007）。
 
-离线/联网切换由调用方决定 LLM 来源（--llm 用 config.create_llm()，
-否则 ScriptedLLM 离线回归）。
+离线/联网切换由调用方决定 LLM 来源（--llm 用 ChatOpenAI（create_chat_model），
+否则 OfflineLLM 离线回归）。
 """
 
 import json
@@ -40,9 +40,9 @@ _REFUSAL_MARKERS = (
 class OfflineLLM:
     """离线回归打桩（CLI 侧 `agent eval run` 无 `--llm` 时的默认执行器）。
 
-    与测试桩 tests/helpers.ScriptedLLM 等价的最小形态（agent 包不反向依赖
-    tests/）：可注入预置回复，耗尽后返回 "(fallback)"——离线冒烟验证
-    数据集加载 + 指标计算 + 基线对比整条管线。
+    与测试桩等价的最小形态（agent 包不反向依赖 tests/）：可注入预置回复，
+    耗尽后返回 "(fallback)"——离线冒烟验证数据集加载 + 指标计算 + 基线对比
+    整条管线。
     """
 
     def __init__(self, responses: Optional[List[str]] = None) -> None:
@@ -73,6 +73,22 @@ def judge_actual(actual: Any, expected: str) -> str:
     return "hallucination"
 
 
+def _llm_content(llm: Any, messages: List[Dict[str, Any]]) -> str:
+    """兼容 BaseChatModel（invoke）与 OfflineLLM/旧 LLM（completion）。
+
+    ``agent eval --llm`` 用 ChatOpenAI（langchain BaseChatModel，002-langchain-
+    ecosystem）；默认离线回归用 OfflineLLM（completion）。鸭子类型统一取 content。
+    """
+    invoke = getattr(llm, "invoke", None)
+    if invoke is not None:
+        from GSagent.core.llm_adapter import dict_to_messages
+
+        resp = invoke(dict_to_messages(messages))
+        return getattr(resp, "content", "") or ""
+    resp = llm.completion(messages)
+    return getattr(resp, "content", "") or ""
+
+
 def run_dataset(
     dataset: List[EvalCase], llm: Any, *, run_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
@@ -82,8 +98,7 @@ def run_dataset(
     for case in dataset:
         actual = ""
         try:
-            resp = llm.completion([{"role": "user", "content": case.prompt}])
-            actual = getattr(resp, "content", "") or ""
+            actual = _llm_content(llm, [{"role": "user", "content": case.prompt}])
             verdict = judge_actual(actual, case.expected)
         except Exception:  # noqa: BLE001 - 单条执行失败落 error，整批继续
             verdict = "error"

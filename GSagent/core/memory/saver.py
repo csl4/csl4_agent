@@ -24,7 +24,7 @@ DEFAULT_STORE_DB = str(DEFAULT_AGENT_DIR / "memory_store.db")
 
 
 def _connect(path: Union[str, Path]) -> sqlite3.Connection:
-    p = Path(str(path).expanduser())
+    p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(str(p), check_same_thread=False, isolation_level=None)
 

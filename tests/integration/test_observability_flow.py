@@ -1,6 +1,4 @@
-"""对象模型端到端集成测试（spec US1/US2/US3 验收场景，quickstart V1-V5）。"""
-
-from a2a.types import TaskState
+"""对象模型端到端集成测试（spec US1/US2 验收场景，quickstart V1-V5）。"""
 
 from GSagent.core.observability import (
     EventEmitter,
@@ -8,9 +6,6 @@ from GSagent.core.observability import (
     MetricsAggregator,
     SessionStatus,
     TaskStatus,
-    from_protocol_task,
-    to_protocol_task,
-    business_state_to_protocol,
 )
 from GSagent.core.observability.models import AgentEventEnvelope, AgentEventType, AgentStatus
 
@@ -131,28 +126,6 @@ class TestUserStory2SessionAggregation:
         all_events = store.query(session_id="s1")
         expected_llm = sum(1 for e in all_events if e.event_type == AgentEventType.LLM_REQUEST)
         assert agents["a1"].llm_call_count == expected_llm
-
-
-class TestUserStory3ProtocolInterop:
-    """US3 业务模型 ↔ A2A 协议模型互操作（spec US3 验收场景 1/2）。"""
-
-    def test_business_task_to_protocol_and_back(self):
-        bt = TaskStatus(task_id="t1", session_id="s1", trace_id="tr-1", state="completed")
-        proto = to_protocol_task(bt, business_state_to_protocol("completed"))
-        assert proto.status.state == TaskState.TASK_STATE_COMPLETED
-        back = from_protocol_task(proto)
-        assert back.task_id == "t1"
-        assert back.session_id == "s1"
-        assert back.state == "completed"
-        assert back.trace_id == "tr-1"
-
-    def test_terminal_state_semantic_alignment(self):
-        """业务终止态与协议终止态语义一致（FR-008 验收场景 2）。"""
-        for business in ("completed", "failed", "canceled", "rejected"):
-            bt = TaskStatus(task_id="t", session_id="s", trace_id="tr", state=business)
-            proto = to_protocol_task(bt, business_state_to_protocol(business))
-            back = from_protocol_task(proto)
-            assert back.state == business
 
 
 class TestEventEmitter:

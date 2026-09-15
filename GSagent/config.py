@@ -40,7 +40,6 @@ from GSagent.core.policy import (
     OutputGuard,
     PathGuard,
 )
-from GSagent.core.agents import ToolCallingLLM
 from GSagent.core.agents.graph_agent import GraphAgent
 from GSagent.core.memory.saver import create_saver, create_store
 from GSagent.core.orchestration.multi import build_multi_agent_graph
@@ -368,71 +367,6 @@ class Config:
         """从 `cost.pricing` 配置段构建成本估算器（空表 = 只记 token，R-06）。"""
         pricing = (self.data.get("cost") or {}).get("pricing", {}) or {}
         return CostEstimator(pricing=pricing)
-
-    def create_tool_calling_llm(
-        self,
-        chat_model: Optional[Any] = None,
-        tools_registry: Optional[ToolRegistry] = None,
-    ) -> ToolCallingLLM: #
-        """根据配置创建 ToolCallingLLM 实例（旧执行路径，纯 langgraph 重构后保留兼容）。
-
-        .. deprecated:: Phase 5
-            新执行路径用 ``create_single_graph_agent`` / ``create_multi_graph_agent`` /
-            ``create_plan_graph_agent``（GraphAgent + 纯 LangGraph 图）。本方法仅供
-            旧测试/兼容消费点使用，新代码请迁移到 GraphAgent。
-
-        参数:
-            chat_model: 可选的预先装配的 BaseChatModel（缺省按 llm 配置 + 全工具 bind_tools）。
-            tools_registry: 可选的预先装配的 ToolRegistry（缺省 create_tools_registry）。
-
-        返回:
-            配置好的 ToolCallingLLM 实例。
-        """
-        agent_config = self.data["agent"]
-        # 企业级 HITL 策略 + 审计（US1 T014/T016，/hitl 运行时切换依赖注入）
-        _, _, hitl_policy, audit_log = self.policy_components()
-        # 企业级用量/成本（US2 T020/T021，FR-007）：record_usage 开关 + 定价表
-        cost_estimator = self.create_cost_estimator()
-        # 可观测（001-langgraph-otel-refactor，contracts/observability.md）：
-        # observability.enabled 时初始化 OTel 并注入 tracer（节点业务 span + 任务级 span）
-        tracer = setup_telemetry(self.data.get("observability"))
-        # 安全护栏（001-langgraph-otel-refactor，contracts/guardrails.md）：
-        # 输入/输出侧 Guardrail，enabled=false 时为 None（既有行为不变）
-        gr = self.data.get("guardrails") or {}
-        input_guard = (
-            InputGuard(deny_patterns=gr.get("input", {}).get("deny_patterns") or [])
-            if gr.get("input", {}).get("enabled", True)
-            else None
-        )
-        output_guard = (
-            OutputGuard(
-                fallback_retries=gr.get("output", {}).get("fallback_retries", 1)
-            )
-            if gr.get("output", {}).get("enabled", True)
-            else None
-        )
-        # langchain 化装配（002-langchain-ecosystem）：ToolRegistry + ChatOpenAI
-        registry = tools_registry or self.create_tools_registry()
-        chat_model = chat_model or create_chat_model(
-            self.data["llm"], tools=registry.get_all_tools()
-        )
-        return ToolCallingLLM(
-            chat_model=chat_model,
-            tools_registry=registry,
-            max_steps=agent_config["max_steps"],
-            enable_compaction=agent_config.get("enable_compaction", True),
-            compaction_threshold_ratio=agent_config.get(
-                "compaction_threshold_ratio", 0.75
-            ),
-            compaction_keep_last_n=agent_config.get("compaction_keep_last_n", 6),
-            hitl_policy=hitl_policy,
-            audit_log=audit_log,
-            cost_estimator=cost_estimator,
-            record_usage=agent_config.get("record_usage", True),
-            tracer=tracer,
-            input_guard=input_guard,
-            output_guard=output_guard,
-        )
 
     def create_tools_registry(self) -> ToolRegistry:
         """装配 langchain 工具注册表：注册全部 @tool 工具集 + 守卫/审批/审计注入。

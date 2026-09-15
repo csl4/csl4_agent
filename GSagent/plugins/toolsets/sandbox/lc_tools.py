@@ -7,9 +7,10 @@
 - 守卫：工具名 "sandbox" 命中 COMMAND_TOOLS，注册时自动挂 CommandGuard。
 """
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from langchain_core.tools import tool
+from pydantic import Field
 
 from GSagent.core.env.terminal import execute_in_shell
 from GSagent.plugins.toolsets.bash.validation import (
@@ -17,7 +18,43 @@ from GSagent.plugins.toolsets.bash.validation import (
     get_effective_lists,
     validate_command,
 )
-from GSagent.plugins.toolsets.sandbox.sandbox_toolset import SandboxExecutorConfig
+from GSagent.utils.pydantic_utils import ToolsetConfig
+
+
+class SandboxExecutorConfig(ToolsetConfig):
+    """轻量沙箱工具集配置（extra="allow"，宪法 III 向后兼容）。
+
+    字段与 BashExecutorConfig 对齐（builtin_allowlist/allow/deny 复用 bash
+    校验层的生效名单语义）。v1 仅支持 lightweight；container 为 v2 占位 →
+    明确报错（FR-004，不静默降级）。
+    """
+
+    type: str = Field(
+        default="lightweight",
+        title="Sandbox Type",
+        description='Sandbox type: "lightweight" (v1) or "container" (v2, not implemented)',
+    )
+    timeout_seconds: int = Field(
+        default=30,
+        title="Timeout Seconds",
+        description="Default command timeout in seconds.",
+    )
+    working_dir: str = Field(
+        default="",
+        title="Working Directory",
+        description="Controlled working directory for sandboxed commands (empty = inherit cwd).",
+    )
+
+    # 复用 bash 校验层的白/黑名单字段（与 BashExecutorConfig 同名同语义）。
+    allow: List[str] = Field(default_factory=list)
+    deny: List[str] = Field(default_factory=list)
+    builtin_allowlist: Literal["none", "core", "extended"] = Field(default="extended")
+
+    bash_path: str = Field(
+        default="",
+        title="Bash Path",
+        description="Path to bash executable (empty = auto-detect, Git Bash on Windows).",
+    )
 
 
 def create_sandbox_tools(

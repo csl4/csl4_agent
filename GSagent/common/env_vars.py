@@ -39,5 +39,5 @@ def log_dir() -> str:
 
 
 def third_party_log_level() -> str:
-    """受管第三方 logger 的统一级别（默认 WARNING；LiteLLM 固定 ERROR）。"""
+    """受管第三方 logger 的统一级别（默认 WARNING）。"""
     return os.getenv("AGENT_LOG_THIRD_PARTY_LEVEL", "WARNING").strip().upper()

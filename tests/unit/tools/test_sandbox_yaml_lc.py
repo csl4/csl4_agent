@@ -7,11 +7,10 @@
 
 from langchain_core.messages import AIMessage
 
-from GSagent.core.agents.tool_calling_llm import ToolCallingLLM
+from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
 from GSagent.core.tools.registry import ToolRegistry
 from GSagent.plugins.toolsets.sandbox.lc_tools import create_sandbox_tools
 from GSagent.plugins.toolsets.yaml_lc_loader import load_yaml_toolsets_lc
-from GSagent.utils.stream import StreamEvents
 from tests.helpers import FakeChatLLM
 
 
@@ -48,9 +47,9 @@ class TestSandboxLc:
                 AIMessage(content="done", response_metadata=_usage()),
             ]
         )
-        agent = ToolCallingLLM(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
-        events = list(agent.call_stream(messages=[{"role": "user", "content": "run"}]))
-        assert any(e.event == StreamEvents.APPROVAL_REQUIRED for e in events)
+        agent = GraphAgent(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
+        items = list(agent.stream(messages=[{"role": "user", "content": "run"}], session_id="sb1"))
+        assert any(isinstance(e, PauseRequest) and e.type == "approval" for e in items)
 
 
 class TestYamlLcLoader:

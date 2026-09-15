@@ -1,7 +1,8 @@
-"""memory 工具集（langchain @tool 版，002-langchain-ecosystem）。
+"""memory 工具集（langchain @tool 版，纯 langgraph 重构）。
 
-remember / search_memory 迁移为 ``@tool``，复用 ``MemoryStore``（SQLite）执行内核。
-配置（db_path/scope/user/max_entries）经工厂闭包注入，不暴露为工具参数。
+remember / search_memory 迁移为 ``@tool``，复用 ``StoreMemoryAdapter`` over langgraph
+BaseStore（SqliteStore 持久化）执行内核。配置（db_path/scope/user/max_entries）
+经工厂闭包注入，不暴露为工具参数。
 无守卫（工具名不在 PATH/COMMAND_TOOLS）；免批（approval_required_tools 为空）。
 """
 
@@ -9,7 +10,9 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
 
-from GSagent.core.memory.store import DEFAULT_MEMORY_DB, MemoryStore, resolve_scope
+from GSagent.core.memory.langgraph_store import StoreMemoryAdapter
+from GSagent.core.memory.saver import create_store
+from GSagent.core.memory.store import DEFAULT_MEMORY_DB, resolve_scope
 from GSagent.core.memory.user import resolve_user_key
 
 VALID_KINDS = ("fact", "preference", "constraint", "correction", "decision")
@@ -33,9 +36,11 @@ def _load_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def create_memory_tools(config: Optional[Dict[str, Any]] = None) -> List[Any]:
-    """工厂：返回 memory @tool 列表（MemoryStore 闭包注入）。"""
+    """工厂：返回 memory @tool 列表（StoreMemoryAdapter 闭包注入，SqliteStore 持久化）。"""
     cfg = _load_config(config)
-    store = MemoryStore(path=cfg["db_path"], max_entries=cfg["max_entries"])
+    store = StoreMemoryAdapter(
+        create_store(cfg["db_path"]), max_entries=cfg["max_entries"]
+    )
     scope_default = cfg["scope"]
     user = cfg["user"]
 

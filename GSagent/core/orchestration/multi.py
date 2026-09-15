@@ -24,7 +24,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Send
 
-from GSagent.core.agents.subagent import SHELL_COMMAND_PREFIXES
 from GSagent.core.llm_adapter import messages_to_dict
 from GSagent.core.observability import AgentEventType
 from GSagent.core.orchestration.nodes import _emit, _msg
@@ -52,6 +51,19 @@ MAIN_SYSTEM_PROMPT = (
 )
 
 _SPLIT_RE = re.compile(r"\s*(?:\&\&|;|\n)\s*")
+
+# 含命令包装/终端程序（powershell/cmd/bash/wsl）：LLM 拆解时常产出
+# "powershell -Command ..." 这类包装命令，首词识别后即可交给命令工具执行。
+SHELL_COMMAND_PREFIXES = frozenset(
+    {
+        "df", "du", "ls", "dir", "cat", "echo", "pwd", "whoami", "uname",
+        "date", "grep", "head", "tail", "sort", "uniq", "wc", "cut", "tr",
+        "id", "hostname", "which", "type", "git", "kubectl", "find", "stat",
+        "base64", "mkdir", "rm", "touch", "cd", "python",
+        "get-childitem", "get-content", "write-output",
+        "powershell", "pwsh", "cmd", "bash", "wsl",
+    }
+)
 
 
 class MultiGraphState(TypedDict, total=False):

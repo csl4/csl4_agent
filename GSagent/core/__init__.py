@@ -9,35 +9,12 @@ from GSagent.core.models import (
     ToolInvokeContext,
     ToolParameter,
 )
-from GSagent.core.providers import LLM, LiteLLMProvider, ModelResponse
+from GSagent.core.providers import LLM, ModelResponse, create_chat_model
 from GSagent.core.prompts import PromptComponent
-from GSagent.core.tools import (
-    CallablePrerequisite,
-    Prerequisite,
-    Tool,
-    ToolExecutor,
-    Toolset,
-    ToolsetStatusEnum,
-    ToolsetTag,
-    ToolsetType,
-    Transformer,
-)
-from GSagent.core.transformers import JsonTruncationTransformer, LineCountTransformer
 from GSagent.core.truncation import ContextWindowLimiter, SessionCompactor
 
-# 多Agent：协议、通信客户端与四类角色（宪法 I：插件/模块化，不侵入单 Agent 主循环）。
-from GSagent.core.a2a.client import A2AClient, A2AClientError, InProcessA2AClient
-from GSagent.core.agents import (
-    AgentRole,
-    BaseAgent,
-    BusinessAgent,
-    MainAgent,
-    Orchestrator,
-    SubAgent,
-    ToolCallingLLM,
-    merge_results,
-    run_task_safe,
-)
+# 面向图的新执行外壳（纯 langgraph，Phase 5 起 CLI/serve 唯一入口）。
+from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
 # 环境适配：跨终端探测/改写/执行（US2 FR-002）。
 from GSagent.core.env.terminal import (
     TerminalType,
@@ -49,45 +26,24 @@ from GSagent.core.env.terminal import (
 from GSagent.core.models.result import ShellResult
 
 __all__ = [
-    "A2AClient",
-    "A2AClientError",
-    "AgentRole",
     "ApprovalRequirement",
-    "BaseAgent",
-    "BusinessAgent",
-    "CallablePrerequisite",
     "SessionCompactor",
     "ContextWindowLimiter",
     "ContextWindowUsage",
-    "InProcessA2AClient",
-    "JsonTruncationTransformer",
-    "LineCountTransformer",
+    "GraphAgent",
     "LLM",
-    "LiteLLMProvider",
-    "MainAgent",
     "ModelResponse",
-    "Orchestrator",
-    "Prerequisite",
+    "PauseRequest",
     "PromptComponent",
     "ShellResult",
     "StructuredToolResult",
     "StructuredToolResultStatus",
-    "SubAgent",
     "TerminalType",
-    "Tool",
-    "adapt_command",
     "ToolCallResult",
-    "ToolCallingLLM",
-    "ToolExecutor",
     "ToolInvokeContext",
     "ToolParameter",
-    "Toolset",
-    "ToolsetStatusEnum",
-    "ToolsetTag",
-    "ToolsetType",
-    "Transformer",
+    "adapt_command",
+    "create_chat_model",
     "detect_shell",
     "execute_in_shell",
-    "merge_results",
-    "run_task_safe",
 ]

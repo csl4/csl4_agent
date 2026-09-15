@@ -8,11 +8,11 @@
 
 from langchain_core.messages import AIMessage
 
-from GSagent.core.agents.tool_calling_llm import ToolCallingLLM
+from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
 from GSagent.core.policy.command_guard import CommandGuard
 from GSagent.core.tools.registry import ToolRegistry
 from GSagent.plugins.toolsets.bash.lc_tools import create_bash_tools
-from GSagent.utils.stream import StreamEvents
+from GSagent.utils.stream import StreamEvents, StreamMessage
 from tests.helpers import FakeChatLLM
 
 
@@ -44,18 +44,18 @@ def _registry():
 
 class TestBashLcTools:
     def test_denied_command_emits_error(self):
-        """validate_command DENIED（sudo 硬编码块）→ ERROR 事件，无最终答案。"""
+        """validate_command DENIED（sudo 硬编码块）→ 无审批交互、命令不执行。"""
         reg = _registry()
         llm = FakeChatLLM(
             responses=[AIMessage(content="", tool_calls=[_tc("sudo ls /root", ["sudo"])], response_metadata=_usage())]
         )
-        agent = ToolCallingLLM(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
-        events = list(agent.call_stream(messages=[{"role": "user", "content": "run"}]))
-        assert any(e.event == StreamEvents.ERROR for e in events), "DENIED 应产 ERROR"
-        assert not any(e.event == StreamEvents.APPROVAL_REQUIRED for e in events)
+        agent = GraphAgent(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
+        items = list(agent.stream(messages=[{"role": "user", "content": "run"}], session_id="b1"))
+        pauses = [e for e in items if isinstance(e, PauseRequest)]
+        assert not pauses, "DENIED 不应触发审批交互"
 
     def test_approval_required_triggers_interrupt(self):
-        """白名单外命令 → APPROVAL_REQUIRED 事件（动态审批）。"""
+        """白名单外命令 → 审批暂停（动态审批）→ 批准后前缀记入 registry。"""
         reg = _registry()
         llm = FakeChatLLM(
             responses=[
@@ -63,14 +63,23 @@ class TestBashLcTools:
                 AIMessage(content="approved done", response_metadata=_usage()),
             ]
         )
-        agent = ToolCallingLLM(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
-        events1 = list(agent.call_stream(messages=[{"role": "user", "content": "run"}]))
-        approval = [e for e in events1 if e.event == StreamEvents.APPROVAL_REQUIRED]
-        assert approval, "应有 APPROVAL_REQUIRED"
-        assert "custom_cmd" in approval[0].data["params"]["command"]
+        agent = GraphAgent(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
+        items1 = list(agent.stream(messages=[{"role": "user", "content": "run"}], session_id="b2"))
+        pauses = [e for e in items1 if isinstance(e, PauseRequest)]
+        assert pauses, "应有审批暂停"
+        assert pauses[0].type == "approval"
+        assert "custom_cmd" in (pauses[0].value.get("params") or {}).get("command", "")
 
-        # 批准后：前缀记入 registry，断点续跑
-        events2 = list(agent.call_stream(messages=[{"role": "user", "content": "run"}], tool_decisions={"c1": True}))
+        # 批准（per-id resume）→ 前缀记入，断点续跑
+        events2 = [
+            e
+            for e in agent.stream(
+                messages=[{"role": "user", "content": "run"}],
+                session_id="b2",
+                resume={pauses[0].id: {"approved": True}},
+            )
+            if isinstance(e, StreamMessage)
+        ]
         end = [e for e in events2 if e.event == StreamEvents.ANSWER_END]
         assert end, "批准后应有最终答案"
         assert "custom_cmd" in reg.approved_prefixes, "批准前缀应记录"
@@ -81,8 +90,7 @@ class TestBashLcTools:
         llm = FakeChatLLM(
             responses=[AIMessage(content="", tool_calls=[_tc("rm -rf /etc", ["rm"])], response_metadata=_usage())]
         )
-        agent = ToolCallingLLM(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
-        events = list(agent.call_stream(messages=[{"role": "user", "content": "run"}]))
-        # CommandGuard 拦截 → 工具返回 blocked 错误 → 无 APPROVAL/ANSWER
-        assert not any(e.event == StreamEvents.APPROVAL_REQUIRED for e in events)
-        assert not any(e.event == StreamEvents.ANSWER_END for e in events)
+        agent = GraphAgent(chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False)
+        items = list(agent.stream(messages=[{"role": "user", "content": "run"}], session_id="b3"))
+        pauses = [e for e in items if isinstance(e, PauseRequest)]
+        assert not pauses, "CommandGuard 拦截不应触发审批交互"

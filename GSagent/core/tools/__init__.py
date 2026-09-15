@@ -1,27 +1,9 @@
-"""工具与工具集基类（原 core/tools.py，拆分为 base/toolset 两模块）。
+"""工具注册表（002-langchain-ecosystem）。
 
-对外保持 `from GSagent.core.tools import X` 兼容（re-export）。
+旧 ``Tool``/``Toolset``/``ToolExecutor`` 执行路径已移除（T029/FR-012），工具以
+langchain ``@tool`` 装饰器定义并经 ``ToolRegistry`` 注册/查询（含守卫/审批包装）。
 """
 
-from GSagent.core.tools.base import Tool, Transformer
-from GSagent.core.tools.executor import ToolExecutor
-from GSagent.core.tools.toolset import (
-    CallablePrerequisite,
-    Prerequisite,
-    Toolset,
-    ToolsetStatusEnum,
-    ToolsetTag,
-    ToolsetType,
-)
+from GSagent.core.tools.registry import ToolRegistry, register_tool
 
-__all__ = [
-    "CallablePrerequisite",
-    "Prerequisite",
-    "Tool",
-    "ToolExecutor",
-    "Toolset",
-    "ToolsetStatusEnum",
-    "ToolsetTag",
-    "ToolsetType",
-    "Transformer",
-]
+__all__ = ["ToolRegistry", "register_tool"]

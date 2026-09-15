@@ -9,6 +9,34 @@ OpenAI 兼容网关（deepseek 等）。``tools`` 传入时 ``bind_tools`` 启�
 
 from typing import Any, Dict, List, Optional
 
+# litellm 风格 provider 前缀（deepseek/xxx → xxx）。ChatOpenAI 把 model 原样
+# 作为 API 的 model 参数；OpenAI 兼容网关（deepseek 等）期望裸模型 id，
+# 不认 litellm 的 provider/model 路由名（contracts/llm.md §3 配置语义保留）。
+_LITELLM_PROVIDERS = {
+    "deepseek",
+    "openai",
+    "azure",
+    "anthropic",
+    "google",
+    "groq",
+    "mistral",
+    "together",
+    "fireworks",
+}
+
+
+def _normalize_model_name(model: str) -> str:
+    """剥离 litellm 风格 provider 前缀（``deepseek/deepseek-v4-flash`` → ``deepseek-v4-flash``）。
+
+    仅当形如 ``known_provider/model_id`` 时剥离；其余（裸 id / 含 / 的自定义名）原样返回。
+    """
+    text = (model or "").strip()
+    if "/" in text:
+        provider, _, rest = text.partition("/")
+        if provider in _LITELLM_PROVIDERS and rest:
+            return rest
+    return text
+
 
 def create_chat_model(
     config: Optional[Dict[str, Any]] = None,
@@ -32,11 +60,18 @@ def create_chat_model(
             "uv pip install 'langchain-openai>=0.3'"
         ) from exc
 
-    model = str(cfg.get("model") or "") or None
+    model = _normalize_model_name(str(cfg.get("model") or "") or "")
     api_key = str(cfg.get("api_key") or "") or None
     base_url = str(cfg.get("base_url") or "") or None
 
-    chat = ChatOpenAI(model=model, api_key=api_key, base_url=base_url)
+    try:
+        chat = ChatOpenAI(model=model, api_key=api_key, base_url=base_url)
+    except Exception as exc:  # noqa: BLE001 - 构造失败收敛为可读配置错误
+        raise RuntimeError(
+            "LLM 装配失败：未配置有效的 API Key。请设置环境变量 "
+            "AGENT_API_KEY（或 OPENAI_API_KEY），或在 .GSagent/config.yaml 的 "
+            "llm.api_key 中配置（base_url 指向 OpenAI 兼容网关，如 deepseek）。"
+        ) from exc
     if tools:
         chat = chat.bind_tools(tools)
     return chat

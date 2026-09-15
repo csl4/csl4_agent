@@ -135,8 +135,13 @@ def traced_node(
 
 
 def _instrument(provider: Any) -> None:
-    """自动埋点：try-import 各 instrumentor，失败优雅降级（FR-010）。"""
-    # LangGraph / LangChain 图与节点执行（traceloop.span.kind=workflow）
+    """自动埋点：try-import 各 instrumentor，失败优雅降级（FR-010）。
+
+    LangChain instrumentor 覆盖 LangGraph 图/节点执行与原生模型类
+    ChatOpenAI（002-langchain-ecosystem 后 LiteLLMProvider 已移除，
+    不再埋点 litellm）。
+    """
+    # LangGraph / LangChain 图与节点执行 + ChatOpenAI（traceloop.span.kind=workflow）
     try:
         from opentelemetry.instrumentation.langchain import LangchainInstrumentor
 
@@ -147,18 +152,6 @@ def _instrument(provider: Any) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - 可观测失败不阻塞
         logger.warning("LangGraph 自动埋点失败：%s", exc)
-
-    # litellm 调用（gen_ai.operation.name=chat，V-01 验证项）
-    try:
-        from opentelemetry.instrumentation.litellm import LiteLLMInstrumentor
-
-        LiteLLMInstrumentor().instrument(tracer_provider=provider)
-    except ImportError:
-        logger.warning(
-            "opentelemetry-instrumentation-litellm 未安装，跳过 litellm 自动埋点。"
-        )
-    except Exception as exc:  # noqa: BLE001 - 可观测失败不阻塞
-        logger.warning("litellm 自动埋点失败：%s", exc)
 
 
 __all__ = ["setup_telemetry"]

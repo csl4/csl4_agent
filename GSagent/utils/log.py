@@ -4,18 +4,16 @@
 # 日志装配：setup_logging(level, format) 配置进程级日志。
 #   · stderr handler（StreamHandler）+ 文件 handler（RotatingFileHandler，
 #     默认 ./.GSagent/logs/agent.log，5MB×5 轮转，UTF-8 编码）——handler 挂在
-#     【根 logger】上，这样 litellm/httpx 等第三方日志也能落盘（它们与 agent 是
+#     【根 logger】上，这样 openai/httpx 等第三方日志也能落盘（它们与 agent 是
 #     兄弟命名空间，挂 GSagent 上永远进不了文件）。
 #   · 幂等装配：模块级哨兵 handler 引用 + 成员检查，重复调用不产生重复 handler；
 #     绝不 clear() 根 handler，嵌入方自己的 handler 原样保留。
-#   · 级别：GSagent.* 由 level 参数/AGENT_LOG_LEVEL 控制；受管第三方 logger 各自
-#     setLevel（LiteLLM→ERROR，其余→AGENT_LOG_THIRD_PARTY_LEVEL，默认 WARNING）；
-#     根 logger 级别不主动改动（最小侵入）。
+#   · 级别：GSagent.* 由 level 参数/AGENT_LOG_LEVEL 控制；受管第三方 logger 统一
+#     setLevel（AGENT_LOG_THIRD_PARTY_LEVEL，默认 WARNING）；根 logger 级别不主动
+#     改动（最小侵入）。
 #   · 可选 excepthook：install_excepthook=True 时把未捕获异常写进日志文件，
 #     并链式调用前一 hook（不吞异常、终端回溯照常、退出码不变）。
 #   · Windows：文件 handler 必须 encoding="utf-8"，否则中文环境(cp936)乱码。
-# 关键前置动作（须在首次 import litellm 前）：
-#   · 设 LITELLM_LOCAL_MODEL_COST_MAP=True（跳过远端模型成本表、离线友好）。
 # =========================================================
 
 import logging
@@ -49,10 +47,8 @@ _INSTALLED_FILE_HANDLER: Optional[logging.Handler] = None
 _EXCEPTHOOK_INSTALLED = False
 _PREVIOUS_EXCEPTHOOK: Optional[Callable[..., Any]] = None
 
-# 受管第三方 logger；LiteLLM 固定 ERROR（压掉无害降级 WARNING），其余默认 WARNING。
+# 受管第三方 logger（002-langchain-ecosystem 后 litellm 已移除），默认 WARNING。
 _THIRD_PARTY_LOGGERS = (
-    "LiteLLM",
-    "litellm",
     "httpx",
     "httpcore",
     "h11",
@@ -69,8 +65,7 @@ def _configure_third_party() -> None:
     """按需设置受管第三方 logger 的级别。"""
     default = third_party_log_level()
     for name in _THIRD_PARTY_LOGGERS:
-        lvl = "ERROR" if name in ("LiteLLM", "litellm") else default
-        logging.getLogger(name).setLevel(getattr(logging, lvl, logging.WARNING))
+        logging.getLogger(name).setLevel(getattr(logging, default, logging.WARNING))
 
 
 def setup_logging(

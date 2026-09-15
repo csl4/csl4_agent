@@ -9,12 +9,6 @@
 - capture_full_content 默认关闭（隐私，OTel GenAI Layer4）
 """
 
-from GSagent.core.observability.mapping import (
-    business_state_to_protocol,
-    from_protocol_task,
-    protocol_state_to_business,
-    to_protocol_task,
-)
 from GSagent.core.observability.metrics import MetricsAggregator
 from GSagent.core.observability.models import (
     AgentEventEnvelope,
@@ -44,8 +38,4 @@ __all__ = [
     "SessionStatus",
     "TaskMetrics",
     "TaskStatus",
-    "business_state_to_protocol",
-    "from_protocol_task",
-    "protocol_state_to_business",
-    "to_protocol_task",
 ]

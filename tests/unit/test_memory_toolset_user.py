@@ -1,51 +1,49 @@
-"""记忆工具集用户隔离单元测试（spec FR-005/SC-005）。"""
+"""记忆工具集用户隔离单元测试（spec FR-005/SC-005，002-langchain-ecosystem）。"""
 
-from GSagent.core.models import ToolInvokeContext
-from GSagent.plugins.toolsets.memory.toolset import create_memory_toolset
+from GSagent.plugins.toolsets.memory.lc_tools import create_memory_tools
 
 
-def make_toolset(tmp_path, user: str, scope: str = "proj-x"):
+def make_tools(tmp_path, user: str, scope: str = "proj-x"):
     """同一 db 路径 + 不同 user → 隔离由 user 维度实现（非 db 隔离）。"""
-    return create_memory_toolset(
+    return create_memory_tools(
         {"db_path": str(tmp_path / "shared.db"), "user": user, "scope": scope}
     )
 
 
-def remember(toolset, content: str):
-    return toolset.tools[0]._invoke({"content": content}, ToolInvokeContext(toolset=toolset))
+def remember(tools, content: str):
+    return tools[0].invoke({"content": content})
 
 
-def search(toolset, query: str):
-    return toolset.tools[1]._invoke({"query": query}, ToolInvokeContext(toolset=toolset))
+def search(tools, query: str):
+    return tools[1].invoke({"query": query})
 
 
 class TestToolsetUserIsolation:
     def test_remember_search_isolated_by_user(self, tmp_path):
         """同一 store（同 db）不同 user 配置 → remember/search 各自隔离（SC-005）。"""
-        ts_a = make_toolset(tmp_path, "alice")
-        ts_b = make_toolset(tmp_path, "bob")
-        assert remember(ts_a, "A 的机密").data["status"] == "saved"
-        assert remember(ts_b, "B 的机密").data["status"] == "saved"
+        tools_a = make_tools(tmp_path, "alice")
+        tools_b = make_tools(tmp_path, "bob")
+        assert "remembered" in remember(tools_a, "A 的机密")
+        assert "remembered" in remember(tools_b, "B 的机密")
 
-        res_a = search(ts_a, "机密")
-        res_b = search(ts_b, "机密")
-        assert res_a.data["count"] == 1
-        assert res_a.data["results"][0]["content"] == "A 的机密"
-        assert res_b.data["count"] == 1
-        assert res_b.data["results"][0]["content"] == "B 的机密"
+        res_a = search(tools_a, "机密")
+        res_b = search(tools_b, "机密")
+        assert "A 的机密" in res_a and "B 的机密" not in res_a
+        assert "B 的机密" in res_b and "A 的机密" not in res_b
 
     def test_same_content_not_shared_across_users(self, tmp_path):
-        ts_a = make_toolset(tmp_path, "alice")
-        ts_b = make_toolset(tmp_path, "bob")
-        assert remember(ts_a, "共同事实").data["status"] == "saved"
-        assert remember(ts_b, "共同事实").data["status"] == "saved"  # 各自成条
-        assert search(ts_a, "共同事实").data["count"] == 1
-        assert search(ts_b, "共同事实").data["count"] == 1
+        tools_a = make_tools(tmp_path, "alice")
+        tools_b = make_tools(tmp_path, "bob")
+        assert "remembered" in remember(tools_a, "共同事实")
+        assert "remembered" in remember(tools_b, "共同事实")  # 各自成条
+        assert search(tools_a, "共同事实").count("共同事实") == 1
+        assert search(tools_b, "共同事实").count("共同事实") == 1
 
     def test_default_user_is_system(self, tmp_path, monkeypatch):
-        """工具集不配 user → 自动系统用户（默认零迁移）。"""
+        """工具不配 user → 自动系统用户（默认零迁移）。"""
         import getpass
 
         monkeypatch.setattr(getpass, "getuser", lambda: "sysuser")
-        ts = create_memory_toolset({"db_path": str(tmp_path / "d.db"), "scope": "p"})
-        assert ts.config.user == "sysuser"
+        tools = create_memory_tools({"db_path": str(tmp_path / "d.db"), "scope": "p"})
+        remember(tools, "系统用户记忆")
+        assert "系统用户记忆" in search(tools, "系统用户记忆")

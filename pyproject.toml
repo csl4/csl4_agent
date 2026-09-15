@@ -12,8 +12,6 @@ dependencies = [
     "jinja2>=3.0",
     "rich>=13.0",
     "bashlex>=0.18",
-    "a2a-sdk==1.0.0a2",
-    "protobuf>=5.29.5",
     "langgraph-cli[inmem]>=0.4.31",
     "langgraph>=1.2.11",
     # 可观测（001-langgraph-otel-refactor）：OpenLLMetry 自动埋点 LangGraph/ChatOpenAI

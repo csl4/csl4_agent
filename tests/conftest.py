@@ -1,10 +1,11 @@
 """pytest 共享配置（宪法 IV：tests/ 镜像 GSagent/）。
 
-环境修复（001-langgraph-otel-refactor 实现期发现）：litellm 的
-``default_encoding`` 默认把 tiktoken tokenizer 缓存强制写到包内只读目录
-（base_llm site-packages），首次调用触发 ``PermissionError``，导致整个
-``GSagent`` 包无法 import。litellm 官方提供 ``CUSTOM_TIKTOKEN_CACHE_DIR``
-覆盖开关，这里统一重定向到系统临时目录下的可写路径。
+环境修复（001-langgraph-otel-refactor 实现期发现）：tiktoken tokenizer
+缓存默认写到包内只读目录（base_llm site-packages），首次调用触发
+``PermissionError``，导致整个 ``GSagent`` 包无法 import。这里统一把
+``TIKTOKEN_CACHE_DIR``/``CUSTOM_TIKTOKEN_CACHE_DIR`` 重定向到系统临时目录
+下的可写路径（002 后 ChatOpenAI 的 ``get_num_tokens_from_messages`` 仍用
+tiktoken，保留此修复）。
 """
 
 import os

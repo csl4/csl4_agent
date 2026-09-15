@@ -9,14 +9,14 @@ FakeChatLLM 离线打桩。验证（SC-001/002，FR-001/002/008）：
 
 from langchain_core.messages import AIMessage
 
-from GSagent.core.agents.tool_calling_llm import ToolCallingLLM
+from GSagent.core.agents.graph_agent import GraphAgent
 from GSagent.core.observability import AgentEventType, MetricsAggregator
 from GSagent.core.tools.registry import ToolRegistry
 from tests.helpers import FakeChatLLM
 
 
 def _agent(chat_model):
-    return ToolCallingLLM(
+    return GraphAgent(
         chat_model=chat_model,
         tools_registry=ToolRegistry(),
         max_steps=5,
@@ -46,9 +46,9 @@ class TestObservabilityEvents:
         )
         agent = _agent(llm)
         list(
-            agent.call_stream(
+            agent.stream(
                 messages=[{"role": "user", "content": "x"}],
-                request_context={"session_id": "s1"},
+                session_id="s1",
             )
         )
         events = agent.event_emitter.store.query(session_id="s1")
@@ -63,7 +63,7 @@ class TestObservabilityEvents:
             responses=[AIMessage(content="hi", response_metadata=_usage(10, 5))]
         )
         agent = _agent(llm)
-        list(agent.call_stream(messages=[{"role": "user", "content": "x"}]))
+        list(agent.stream(messages=[{"role": "user", "content": "x"}], session_id="s1"))
         events = agent.event_emitter.store.query()
         llm_ev = [e for e in events if e.event_type == AgentEventType.LLM_RESPONSE]
         assert len(llm_ev) == 1
@@ -81,7 +81,7 @@ class TestObservabilityEvents:
             responses=[AIMessage(content="hi", response_metadata=_usage())]
         )
         agent = _agent(llm)
-        list(agent.call_stream(messages=[{"role": "user", "content": "x"}]))
+        list(agent.stream(messages=[{"role": "user", "content": "x"}], session_id="s1"))
         events = agent.event_emitter.store.query()
         assert all(not e.trace_id for e in events)
 
@@ -94,7 +94,7 @@ class TestObservabilityEvents:
             ]
         )
         agent = _agent(llm)
-        list(agent.call_stream(messages=[{"role": "user", "content": "run"}]))
+        list(agent.stream(messages=[{"role": "user", "content": "run"}], session_id="s1"))
         events = agent.event_emitter.store.query()
         types = {e.event_type for e in events}
         assert AgentEventType.TOOL_CALL_START in types

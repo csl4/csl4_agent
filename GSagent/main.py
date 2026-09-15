@@ -52,13 +52,14 @@ from GSagent.core.runtime.tasks import DurableTaskManager, queue_db_path
 from GSagent.core.history import SnapshotManager
 from GSagent.core.history.store import HistoryStore
 from GSagent.core.memory import (
-    MemoryStore,
     SessionMemoryStore,
     memory_db_path,
     resolve_scope,
     resolve_user_key,
     sessions_dir_path,
 )
+from GSagent.core.memory.langgraph_store import StoreMemoryAdapter
+from GSagent.core.memory.saver import create_store
 from GSagent.core.skills.env_info import collect_env_info, format_env_info
 from GSagent.core.skills.library import Skill, SkillLibrary
 from GSagent.plugins.toolsets.bash.common.cli_prefixes import (
@@ -573,7 +574,7 @@ class _ChatCtx:
     session_id: str = ""
     plan_mode: bool = False
     plan_agent: Any = None
-    memory_store: Optional[MemoryStore] = None
+    memory_store: Optional[StoreMemoryAdapter] = None
     memory_scope: str = ""
     memory_user: str = ""
     session_memory: Optional[SessionMemoryStore] = None
@@ -710,7 +711,7 @@ def _chat_loop(
     toolsets: List[Any],
     plan_mode: bool = False,
     plan_agent: Any = None,
-    memory_store: Optional[MemoryStore] = None,
+    memory_store: Optional[StoreMemoryAdapter] = None,
     session_memory: Optional[SessionMemoryStore] = None,
     skill_library: Optional[SkillLibrary] = None,
     memory_scope: str = "",
@@ -853,7 +854,10 @@ def chat(
     memory_user = resolve_user_key(
         str((config.data.get("memory") or {}).get("user") or "")
     )
-    memory_store = MemoryStore(path=memory_db_path(config))
+    memory_store = StoreMemoryAdapter(
+        create_store(memory_db_path(config)),
+        max_entries=int((config.data.get("memory") or {}).get("max_entries") or 500),
+    )
     session_memory = SessionMemoryStore(root=sessions_dir_path(config), user=memory_user)
     skill_library = SkillLibrary()
     memory_scope = resolve_scope(

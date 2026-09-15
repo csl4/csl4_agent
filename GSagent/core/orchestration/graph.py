@@ -30,7 +30,6 @@ from GSagent.core.orchestration.nodes import (
     guard_in_node,
     guard_out_node,
     make_should_continue,
-    tools_node,
 )
 from GSagent.core.orchestration.state import GraphState
 from GSagent.core.tools.approval import wrap_all_with_approval
@@ -40,44 +39,6 @@ from GSagent.utils.stream import StreamEvents
 def route_after_guard_in(state: Dict[str, Any]) -> str:
     """guard_in 之后：输入被拦截（terminated=blocked）→ 结束；否则进 agent。"""
     return "end" if state.get("terminated") else "agent"
-
-
-def build_graph(loop: Any) -> Callable[..., Any]:
-    """组装并编译既有编排图（手写 tools_node 审批，002 契约）。
-
-    参数:
-        loop: ToolCallingLLM 实例（节点复用其 LLM/工具执行/审计/压缩等能力）。
-
-    返回:
-        编译好的 LangGraph CompiledStateGraph。消费方式：
-        ``graph.stream(initial_state, config, stream_mode="updates")``
-        （见 ToolCallingLLM.call_stream 适配器）。
-    """
-    builder = StateGraph(GraphState)
-
-    # 手动业务 span（方案 A + 手动叠加，contracts/observability.md §2）：
-    # loop 提供 _tracer 时节点包一层 node.<name> span；未启用则透传零开销。
-    tracer = getattr(loop, "_tracer", None)
-    builder.add_node("guard_in", traced_node(tracer, "guard_in")(guard_in_node(loop)))
-    builder.add_node("agent", traced_node(tracer, "agent")(agent_node(loop)))
-    builder.add_node("tools", traced_node(tracer, "tools")(tools_node(loop)))
-    builder.add_node("guard_out", traced_node(tracer, "guard_out")(guard_out_node(loop)))
-
-    builder.add_edge(START, "guard_in")
-    builder.add_conditional_edges(
-        "guard_in",
-        route_after_guard_in,
-        {"agent": "agent", "end": "guard_out"},
-    )
-    builder.add_conditional_edges(
-        "agent",
-        make_should_continue(loop),
-        {"tools": "tools", "end": "guard_out"},
-    )
-    builder.add_edge("tools", "agent")  # interrupt 由 tools 内部处理暂停，正常返回回 agent
-    builder.add_edge("guard_out", END)
-
-    return builder.compile(checkpointer=InMemorySaver())
 
 
 def _make_tool_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
@@ -115,24 +76,28 @@ def _make_tool_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
             )
         out = inner.invoke(state)
         tool_msgs = out.get("messages") or []
+        known = {t.name for t in loop.tools_registry.get_all_tools()}
         for m in tool_msgs:
+            m_name = getattr(m, "name", "")
             stream_msgs.append(
                 _msg(
                     StreamEvents.TOOL_RESULT,
                     {
                         "tool_call_id": getattr(m, "tool_call_id", ""),
-                        "tool_name": getattr(m, "name", ""),
+                        "tool_name": m_name,
                         "content": str(m.content),
                     },
                 )
             )
+            # 工具缺失 / 返回错误 → TOOL_ERROR 事件（事件流完整性）
+            is_err = m_name not in known or str(m.content).startswith("Error")
             _emit(
                 loop,
-                AgentEventType.TOOL_CALL_END,
+                AgentEventType.TOOL_ERROR if is_err else AgentEventType.TOOL_CALL_END,
                 state=state,
-                message=f"tool end {getattr(m, 'name', '')}",
+                message=f"tool {'error' if is_err else 'end'} {m_name}",
                 payload={
-                    "tool": getattr(m, "name", ""),
+                    "tool": m_name,
                     "tool_call_id": getattr(m, "tool_call_id", ""),
                 },
             )

@@ -1,32 +1,10 @@
-"""多Agent 角色实现：主 / 编排 / 业务 / 动态 SubAgent。"""
+"""Agent 外壳：面向图的新执行入口（纯 langgraph 重构）。
 
-from GSagent.core.agents.base_agent import (
-    AgentRole,
-    BaseAgent,
-    FAILED_STATES,
-    run_task_safe,
-    task_input_text,
-    task_result_text,
-    task_state_text,
-)
-from GSagent.core.agents.business_agent import BusinessAgent
-from GSagent.core.agents.main_agent import MainAgent
-from GSagent.core.agents.orchestrator import Orchestrator, merge_results
-from GSagent.core.agents.subagent import SubAgent
-from GSagent.core.agents.tool_calling_llm import ToolCallingLLM
+``GraphAgent`` 是 CLI/serve 的唯一执行入口：编译并暴露 LangGraph 图
+（单 Agent / 多 Agent / Plan），``stream()`` 产出 ``StreamMessage``（渲染）
+与 ``PauseRequest``（审批暂停，per-interrupt-id resume）。
+"""
 
-__all__ = [
-    "AgentRole",
-    "BaseAgent",
-    "BusinessAgent",
-    "FAILED_STATES",
-    "MainAgent",
-    "Orchestrator",
-    "SubAgent",
-    "ToolCallingLLM",
-    "merge_results",
-    "run_task_safe",
-    "task_input_text",
-    "task_result_text",
-    "task_state_text",
-]
+from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
+
+__all__ = ["GraphAgent", "PauseRequest"]

@@ -6,12 +6,12 @@
 
 from langchain_core.messages import AIMessage
 
-from GSagent.core.agents.tool_calling_llm import ToolCallingLLM
+from GSagent.core.agents.graph_agent import GraphAgent
 from GSagent.core.policy.path_guard import PathGuard
 from GSagent.core.tools.registry import ToolRegistry
 from GSagent.plugins.toolsets.filesystem.lc_tools import create_filesystem_tools
 from GSagent.plugins.toolsets.memory.lc_tools import create_memory_tools
-from GSagent.utils.stream import StreamEvents
+from GSagent.utils.stream import StreamEvents, StreamMessage
 from tests.helpers import FakeChatLLM
 
 
@@ -52,10 +52,14 @@ class TestLcToolsFlow:
                 AIMessage(content="file read done", response_metadata=_usage(10, 4)),
             ]
         )
-        agent = ToolCallingLLM(
+        agent = GraphAgent(
             chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False
         )
-        events = list(agent.call_stream(messages=[{"role": "user", "content": "read"}]))
+        events = [
+            e
+            for e in agent.stream(messages=[{"role": "user", "content": "read"}], session_id="f1")
+            if isinstance(e, StreamMessage)
+        ]
         end = [e for e in events if e.event == StreamEvents.ANSWER_END]
         assert end, "应有 ANSWER_END"
         # 消息快照含 read_file 工具结果（hello world）
@@ -87,9 +91,13 @@ class TestLcToolsFlow:
                 AIMessage(content="stored", response_metadata=_usage(10, 4)),
             ]
         )
-        agent = ToolCallingLLM(
+        agent = GraphAgent(
             chat_model=llm, tools_registry=reg, max_steps=5, enable_compaction=False
         )
-        events = list(agent.call_stream(messages=[{"role": "user", "content": "remember"}]))
+        events = [
+            e
+            for e in agent.stream(messages=[{"role": "user", "content": "remember"}], session_id="f2")
+            if isinstance(e, StreamMessage)
+        ]
         end = [e for e in events if e.event == StreamEvents.ANSWER_END]
         assert end and "stored" in end[-1].data["content"]

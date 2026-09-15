@@ -10,16 +10,13 @@
 消息快照经 ``messages_to_dict`` 输出（消费方零改动）。
 """
 
-import json
 from typing import Any, Callable, Dict, List, Optional
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
-    ToolMessage,
 )
-from langgraph.types import interrupt
 
 from GSagent.core.llm_adapter import (
     dict_to_messages,
@@ -110,125 +107,6 @@ def _same_tool_calls(a: List[Dict[str, Any]], b: List[Dict[str, Any]]) -> bool:
         if x.get("args") != y.get("args"):
             return False
     return True
-
-
-# ---- 工具执行辅助 ----
-def _execute_tool_calls(
-    loop: Any,
-    state: Dict[str, Any],
-    tool_calls: List[Dict[str, Any]],
-    messages: List[BaseMessage],
-    stream_msgs: List[Dict[str, Any]],
-) -> tuple:
-    """执行工具调用（守卫/审批包装后），返回 (新增 ToolMessage, 待审批调用, 前端暂停)。
-
-    - 守卫：工具经 ``wrap_with_guards`` 注册，invoke 前拦截返回错误。
-    - 审批：经 ``wrap_with_approval`` 注册的工具，需审批时返回审批信号 → 收集，
-      由调用方 interrupt() 暂停。
-    """
-    request_context = state.get("request_context")
-    tool_msgs: List[BaseMessage] = []
-    approval_calls: List[tuple] = []  # (tool_call, tool, params)
-    frontend_result: Optional[tuple] = None
-
-    for tc in tool_calls:
-        name = tc.get("name", "")
-        tc_id = tc.get("id", "")
-        args = tc.get("args") or {}
-        _emit(
-            loop,
-            AgentEventType.TOOL_CALL_START,
-            state=state,
-            message=f"tool start {name}",
-            payload={"tool": name, "tool_call_id": tc_id},
-        )
-        tool = loop.tools_registry.get_tool(name)
-        if tool is None:
-            content = f"Error: tool '{name}' not found."
-            tool_msgs.append(ToolMessage(content=content, tool_call_id=tc_id, name=name))
-            stream_msgs.append(
-                _msg(
-                    StreamEvents.ERROR,
-                    {"error": content, "tool_name": name},
-                )
-            )
-            _emit(
-                loop,
-                AgentEventType.TOOL_ERROR,
-                state=state,
-                message=f"tool error {name}",
-                payload={"tool": name, "tool_call_id": tc_id},
-            )
-            continue
-        # 审批检查（静态规则或动态 approval_check，如 bash validate_command）
-        approval_req = loop.tools_registry.approval_requirement(name, args)
-        if approval_req:
-            if approval_req.get("denied"):
-                # 硬拒绝（不可审批豁免，如 bash DENIED）→ 错误 ToolMessage + ERROR 事件
-                content = f"Error: {approval_req.get('reason') or 'command denied'}"
-                tool_msgs.append(ToolMessage(content=content, tool_call_id=tc_id, name=name))
-                stream_msgs.append(
-                    _msg(StreamEvents.ERROR, {"error": content, "tool_name": name})
-                )
-            else:
-                approval_calls.append((tc, tool, args, approval_req))
-                _emit(
-                    loop,
-                    AgentEventType.TOOL_ERROR,
-                    state=state,
-                    message=f"tool approval required {name}",
-                    payload={"tool": name, "tool_call_id": tc_id},
-                )
-            continue
-        # 守卫 + 执行（工具已包装守卫；invoke 抛错即拦截）
-        try:
-            raw = tool.invoke(args)
-            # 工具返回信号 dict：前端暂停 / 硬拒绝 / 动态审批
-            if isinstance(raw, dict):
-                if raw.get("__frontend_pause__"):
-                    if frontend_result is None:
-                        frontend_result = (tc, tool)
-                    continue
-                if raw.get("__denied__"):
-                    content = f"Error: {raw['__denied__']}"
-                    tool_msgs.append(ToolMessage(content=content, tool_call_id=tc_id, name=name))
-                    stream_msgs.append(
-                        _msg(StreamEvents.ERROR, {"error": content, "tool_name": name})
-                    )
-                    _emit(
-                        loop,
-                        AgentEventType.TOOL_ERROR,
-                        state=state,
-                        message=f"tool denied {name}",
-                        payload={"tool": name, "tool_call_id": tc_id},
-                    )
-                    continue
-                if raw.get("__approval_required__"):
-                    info = raw["__approval_required__"] or {}
-                    approval_calls.append((tc, tool, args, info))
-                    _emit(
-                        loop,
-                        AgentEventType.TOOL_ERROR,
-                        state=state,
-                        message=f"tool approval required {name}",
-                        payload={"tool": name, "tool_call_id": tc_id},
-                    )
-                    continue
-            content = str(raw)
-            ev_type = AgentEventType.TOOL_CALL_END
-        except Exception as exc:  # noqa: BLE001 - 工具错误 → ToolMessage
-            content = f"Error: {exc}"
-            ev_type = AgentEventType.TOOL_ERROR
-        tool_msgs.append(ToolMessage(content=content, tool_call_id=tc_id, name=name))
-        _emit(
-            loop,
-            ev_type,
-            state=state,
-            message=f"tool end {name}",
-            payload={"tool": name, "tool_call_id": tc_id},
-        )
-
-    return tool_msgs, approval_calls, frontend_result
 
 
 # ---- 节点：输入侧 Guardrail ----
@@ -337,6 +215,21 @@ def agent_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
             tokens_out=usage.completion_tokens,
             cost_usd=cost_usd,
         )
+        # 企业级审计：每次 LLM 调用一条 model_call（含 token/成本，FR-005/007）
+        if loop.audit_log is not None:
+            session_id, task_id = _ctx_ids(state)
+            loop.audit_log.record(
+                event_type="model_call",
+                payload={"model": loop.model_name},
+                session_id=session_id,
+                usage={
+                    "total_tokens": usage.total_tokens,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "model": loop.model_name,
+                    "estimated_cost": round(cost_usd, 6),
+                },
+            )
 
         # 判定
         last_tool_calls: List[Dict[str, Any]] = []
@@ -419,117 +312,6 @@ def make_should_continue(loop: Any) -> Callable[[Dict[str, Any]], str]:
     return _should_continue
 
 
-# ---- 节点：并行工具执行（interrupt 审批暂停/恢复）----
-def tools_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
-    """Tools 节点：执行 AIMessage.tool_calls → ToolMessage；审批 interrupt 暂停。"""
-
-    def _tools(state: Dict[str, Any]) -> Dict[str, Any]:
-        messages: List[BaseMessage] = list(state.get("messages") or [])
-        tool_calls: List[Dict[str, Any]] = list(state.get("last_tool_calls") or [])
-        tool_number: int = int(state.get("tool_number", 0))
-        stream_msgs: List[Dict[str, Any]] = []
-
-        for tc in tool_calls:
-            tool_number += 1
-            stream_msgs.append(
-                _msg(
-                    StreamEvents.START_TOOL,
-                    {
-                        "tool_call_id": tc.get("id", ""),
-                        "tool_name": tc.get("name", "unknown"),
-                        "tool_number": tool_number,
-                    },
-                )
-            )
-
-        tool_msgs, approval_calls, frontend_result = _execute_tool_calls(
-            loop, state, tool_calls, messages, stream_msgs
-        )
-
-        # 前端暂停（interrupt）：等前端执行，恢复后回填结果
-        if frontend_result is not None and not approval_calls:
-            f_tc, _f_tool = frontend_result
-            resumed: Any = interrupt(
-                {
-                    "type": "frontend",
-                    "tool_name": f_tc.get("name", ""),
-                    "tool_call_id": f_tc.get("id", ""),
-                    "messages": messages_to_dict(messages),
-                }
-            )
-            frontend_results = (resumed or {}).get("frontend_tool_results") or {}
-            for tc_id, data in frontend_results.items():
-                content = (
-                    json.dumps(data, ensure_ascii=False, default=str)
-                    if not isinstance(data, str)
-                    else data
-                )
-                tool_msgs.append(
-                    ToolMessage(content=content, tool_call_id=tc_id, name=f_tc.get("name", ""))
-                )
-
-        # 审批暂停（interrupt）：等用户决策，恢复后处理
-        if approval_calls:
-            first_tc, _, _, first_req = approval_calls[0]
-            resumed: Any = interrupt(
-                {
-                    "type": "approval",
-                    "tool_name": first_tc.get("name", ""),
-                    "tool_call_id": first_tc.get("id", ""),
-                    "params": first_tc.get("args", {}),
-                    "reason": (first_req or {}).get("reason") or "requires approval",
-                    "prefixes_to_save": (first_req or {}).get("prefixes_to_save") or [],
-                    "pending_approvals": [
-                        {
-                            "tool_name": tc.get("name", ""),
-                            "tool_call_id": tc.get("id", ""),
-                            "params": tc.get("args", {}),
-                            "reason": (req or {}).get("reason") or "requires approval",
-                        }
-                        for tc, _, _, req in approval_calls
-                    ],
-                    "messages": messages_to_dict(messages),
-                }
-            )
-            decisions = (resumed or {}).get("tool_decisions") or {}
-            for tc, tool, args, req in approval_calls:
-                tc_id = tc.get("id", "")
-                name = tc.get("name", "")
-                if decisions.get(tc_id, decisions.get(name)):
-                    # 用户批准：记录批准前缀（bash/sandbox 重新校验放行），再执行
-                    loop.tools_registry.record_approval((req or {}).get("prefixes_to_save"))
-                    try:
-                        raw = tool.invoke(args)
-                        if isinstance(raw, dict):
-                            content = (
-                                f"Error: {raw.get('__denied__')}"
-                                if raw.get("__denied__")
-                                else str(raw)
-                            )
-                        else:
-                            content = str(raw)
-                    except Exception as exc:  # noqa: BLE001
-                        content = f"Error: {exc}"
-                    tool_msgs.append(ToolMessage(content=content, tool_call_id=tc_id, name=name))
-                else:
-                    tool_msgs.append(
-                        ToolMessage(
-                            content="User denied approval for this tool call.",
-                            tool_call_id=tc_id,
-                            name=name,
-                        )
-                    )
-
-        return {
-            "messages": tool_msgs,
-            "tool_number": tool_number,
-            "last_tool_calls": [],
-            "_stream_messages": stream_msgs,
-        }
-
-    return _tools
-
-
 # ---- 节点：输出侧 Guardrail + 熔断终态 ----
 def guard_out_node(loop: Any) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
     """输出侧 Guardrail：处理熔断终态 + 输出校验。"""
@@ -584,5 +366,4 @@ __all__ = [
     "guard_in_node",
     "guard_out_node",
     "make_should_continue",
-    "tools_node",
 ]

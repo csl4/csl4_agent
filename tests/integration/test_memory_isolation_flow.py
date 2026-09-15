@@ -1,10 +1,15 @@
 """记忆隔离端到端集成测试（spec US1/US2 验收，SC-001~SC-005，quickstart V1-V5）。"""
 
-from GSagent.core.memory import MemoryStore, SessionMemoryStore
-from GSagent.core.models import ToolInvokeContext
-from GSagent.plugins.toolsets.memory.toolset import create_memory_toolset
+from GSagent.core.memory import SessionMemoryStore
+from GSagent.core.memory.langgraph_store import StoreMemoryAdapter
+from GSagent.core.memory.saver import create_store
+from GSagent.plugins.toolsets.memory.lc_tools import create_memory_tools
 
 SCOPE = "proj-x"
+
+
+def _adapter(db):
+    return StoreMemoryAdapter(create_store(db))
 
 
 class TestLongTermMemoryEndToEnd:
@@ -13,8 +18,8 @@ class TestLongTermMemoryEndToEnd:
     def test_two_user_full_flow(self, tmp_path):
         """A/B remember → search 互不可见 → A forget_scope 不影响 B（SC-001/002）。"""
         db = tmp_path / "memory.db"
-        store_a = MemoryStore(path=db)
-        store_b = MemoryStore(path=db)
+        store_a = _adapter(db)
+        store_b = _adapter(db)
 
         store_a.remember(scope=SCOPE, content="A 的决策：用 uv 管理依赖", user="alice")
         store_b.remember(scope=SCOPE, content="B 的约束：部署到内网", user="bob")
@@ -31,14 +36,14 @@ class TestLongTermMemoryEndToEnd:
     def test_tool_and_store_isolation_consistent(self, tmp_path):
         """工具 remember/search 与底层 store 隔离一致（SC-005）。"""
         db = str(tmp_path / "shared.db")
-        ts_a = create_memory_toolset({"db_path": db, "user": "alice", "scope": SCOPE})
-        ts_b = create_memory_toolset({"db_path": db, "user": "bob", "scope": SCOPE})
+        tools_a = create_memory_tools({"db_path": db, "user": "alice", "scope": SCOPE})
+        tools_b = create_memory_tools({"db_path": db, "user": "bob", "scope": SCOPE})
 
-        ts_a.tools[0]._invoke({"content": "工具记忆 A"}, ToolInvokeContext(toolset=ts_a))
-        ts_b.tools[0]._invoke({"content": "工具记忆 B"}, ToolInvokeContext(toolset=ts_b))
+        tools_a[0].invoke({"content": "工具记忆 A"})
+        tools_b[0].invoke({"content": "工具记忆 B"})
 
         # 经底层 store 直接查询也应隔离（工具视角与存储视角一致）
-        store = MemoryStore(path=db)
+        store = _adapter(db)
         assert len(store.search(SCOPE, "工具记忆", user="alice")) == 1
         assert len(store.search(SCOPE, "工具记忆", user="bob")) == 1
 
@@ -72,6 +77,6 @@ class TestBackwardCompat:
 
     def test_default_user_behavior_unchanged(self, tmp_path):
         """不传 user 的既有调用 → 默认系统用户，行为不变。"""
-        store = MemoryStore(path=tmp_path / "m.db")
+        store = _adapter(tmp_path / "m.db")
         store.remember(scope=SCOPE, content="既有调用记忆")
         assert len(store.list(SCOPE)) == 1  # 不传 user
