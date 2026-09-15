@@ -3,12 +3,12 @@
 
 # ======================= 中文导览 =======================
 # 本文件是【装配根 / 装配工】：唯一的「组合根」，从这里把整台机器组装好。
-#   Config.create_llm()              → 造 LLM provider
-#   Config.create_tool_executor()    → 载内置 Python 工具集 + YAML 工具集，打包成 ToolExecutor
-#   Config.create_tool_calling_llm() → 把 LLM + ToolExecutor + compactor + limiter 组装成主循环
+#   Config.create_tools_registry()    → 载全部 @tool 工具集进 ToolRegistry（含守卫/审批注入）
+#   Config.create_tool_calling_llm()  → 把 chat_model + ToolRegistry + compactor + limiter
+#                                        组装成 ToolCallingLLM 主循环
 # 设计理念：
 #   ① 依赖是「构造函数注入」，不内部 new —— main.py 从这里拿拼好的对象。
-#   ② 工具集多元化：内置 Python 模块 + YAML 模板文件都能注册进同一 ToolExecutor。
+#   ② 工具集多元化：内置 Python @tool 模块 + YAML 工具集都注册进同一 ToolRegistry。
 #   ③ 配置四层覆盖（优先级从低到高）：默认值 → YAML 文件 → 环境变量
 #      （_ENV_OVERRIDES 声明式表）→ CLI 覆盖（Config.apply_overrides）。
 # =========================================================
@@ -40,11 +40,15 @@ from GSagent.core.policy import (
     OutputGuard,
     PathGuard,
 )
-from GSagent.core.providers import LLM, LiteLLMProvider
 from GSagent.core.agents import ToolCallingLLM
-from GSagent.core.tools import ToolExecutor, Toolset, ToolsetTag
-from GSagent.plugins.toolsets import BUILTIN_PYTHON_TOOLSETS
-from GSagent.plugins.toolsets.yaml_loader import load_yaml_toolsets
+from GSagent.core.agents.graph_agent import GraphAgent
+from GSagent.core.memory.saver import create_saver, create_store
+from GSagent.core.orchestration.multi import build_multi_agent_graph
+from GSagent.core.orchestration.plan import build_plan_graph
+from GSagent.core.orchestration.workers import (
+    create_business_worker,
+    create_command_worker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +149,17 @@ def _env_str(raw: str, current: Any) -> Any:
     return raw
 
 
+def _env_api_key(raw: str, current: Any) -> Any:
+    """API Key 环境变量：空串视为未设置，不覆盖配置文件里的 key。
+
+    否则 ``AGENT_API_KEY=""``（shell 里被置空的常见情况）会覆盖 config.yaml
+    的有效 key，导致 ChatOpenAI 构造时 Missing credentials。
+    """
+    if raw is None or str(raw).strip() == "":
+        return current
+    return raw
+
+
 def _env_bool(raw: str, current: Any) -> Any:
     """把环境变量字符串解析为布尔；空串/非法值回退当前值。"""
     if raw is None or raw == "":
@@ -169,7 +184,7 @@ def _env_int(raw: str, current: Any) -> Any:
 # 第一个已设置的（兼容回退，如 OPENAI_API_KEY）。转换器签名: (raw, current) -> value。
 _ENV_OVERRIDES: List[Tuple[str, Any, Callable[[str, Any], Any]]] = [
     ("llm.model", "AGENT_MODEL", _env_str),
-    ("llm.api_key", ("AGENT_API_KEY", "OPENAI_API_KEY"), _env_str),
+    ("llm.api_key", ("AGENT_API_KEY", "OPENAI_API_KEY"), _env_api_key),
     ("llm.base_url", "AGENT_BASE_URL", _env_str),
     ("agent.max_steps", "AGENT_MAX_STEPS", _env_int),
     ("multi_agent.enabled", "AGENT_MULTI_AGENT", _env_bool),
@@ -322,21 +337,12 @@ class Config:
         """返回合并后的沙箱配置（multi_agent.sandbox 覆盖顶层 sandbox:）。"""
         return self._merge_sandbox(self.data)
 
-    def create_llm(self) -> LLM:
-        """根据配置创建 LLM provider。"""
-        llm_config = self.data["llm"]
-        return LiteLLMProvider(
-            model=llm_config["model"],
-            api_key=llm_config["api_key"],
-            base_url=llm_config["base_url"],
-        )
-
     # ---- 企业级安全策略装配（002-enterprise-cli-upgrade US1，contracts/config.md）----
     def policy_components(self):
         """从 `policy` 配置段构建守卫/HITL/审计组件。
 
         返回 ``(path_guard, command_guard, hitl_policy, audit_log)`` 四元组，
-        供 create_tool_executor / create_tool_calling_llm 注入（US1 T013/T014）。
+        供 create_tools_registry / create_tool_calling_llm 注入（US1 T013/T014）。
         audit_dir 为空 → 默认 ./.GSagent/audit（audit.py 的 DEFAULT_AUDIT_DIR）。
         """
         policy = self.data.get("policy") or {}
@@ -357,73 +363,16 @@ class Config:
         pricing = (self.data.get("cost") or {}).get("pricing", {}) or {}
         return CostEstimator(pricing=pricing)
 
-    def create_tool_executor(
-        self,
-        toolsets: Optional[List[Toolset]] = None, # 显式传入
-        toolset_tag_filter: Optional[List[ToolsetTag]] = None,
-    ) -> ToolExecutor:
-        """根据配置创建 ToolExecutor，可选附加额外的 toolsets。
-
-        按以下来源加载 toolsets：
-        1. 显式传入的 toolsets 列表
-        2. GSagent/plugins/toolsets/*.yaml 中的 YAML 文件
-        3. plugins/toolsets/__init__.py 的 BUILTIN_PYTHON_TOOLSETS 注册表：
-           每个工具集类（工厂）自己创建实例，
-           config.yaml 对应段（如 `bash:`）作为 install config 传入
-
-        参数:
-            toolsets: 可选的预先创建的 Toolset 实例列表。
-            toolset_tag_filter: 可选的标签过滤器。只加载至少匹配一个标签的
-                toolsets。None 表示不过滤。
-                CLI 模式： [ToolsetTag.CORE, ToolsetTag.CLI]
-
-
-
-                 Server 模式： [ToolsetTag.CORE, ToolsetTag.CLUSTER]
-
-        返回:
-            配置好的 ToolExecutor 实例。
-        """
-        all_toolsets: List[Toolset] = list(toolsets or []) # 如果为空
-
-        for name, factory in BUILTIN_PYTHON_TOOLSETS.items(): # 项目工具集合
-
-            try:
-                toolset = factory(self.data.get(name) or None) #
-                if toolset:
-                    all_toolsets.append(toolset)
-            except Exception as e:
-                logger.warning(f"Failed to load builtin toolset '{name}': {e}")
-
-        # Load YAML toolsets from the plugins/toolsets directory
-        toolsets_dir = Path(__file__).parent / "plugins" / "toolsets"
-        yaml_toolsets = load_yaml_toolsets(toolsets_dir)
-        all_toolsets.extend(yaml_toolsets)
-        # 企业级守卫/审批/审计注入（US1 T013/T016，缺省 policy 段即默认行为）
-        path_guard, command_guard, hitl_policy, audit_log = self.policy_components()
-        return ToolExecutor(
-            toolsets=all_toolsets,
-            toolset_tag_filter=toolset_tag_filter,
-            path_guard=path_guard,
-            command_guard=command_guard,
-            hitl_policy=hitl_policy,
-            audit_log=audit_log,
-        )
-
     def create_tool_calling_llm(
         self,
         chat_model: Optional[Any] = None,
         tools_registry: Optional[ToolRegistry] = None,
-        tool_executor: Optional[Any] = None,
-        llm: Optional[Any] = None,
-        toolset_tag_filter: Optional[List[ToolsetTag]] = None,
     ) -> ToolCallingLLM: #
         """根据配置创建 ToolCallingLLM 实例（002-langchain-ecosystem：chat_model + ToolRegistry）。
 
         参数:
             chat_model: 可选的预先装配的 BaseChatModel（缺省按 llm 配置 + 全工具 bind_tools）。
             tools_registry: 可选的预先装配的 ToolRegistry（缺省 create_tools_registry）。
-            tool_executor / llm / toolset_tag_filter: 旧参数（002 迁移期保留兼容，被新路径忽略）。
 
         返回:
             配置好的 ToolCallingLLM 实例。
@@ -506,5 +455,127 @@ class Config:
         for t in load_yaml_toolsets_lc(toolsets_dir):
             registry.register(t)
         return registry
+
+    # ---- 纯 langgraph 装配（Phase 5 CLI 契约切换）----
+
+    def create_saver(self) -> Any:
+        """构造持久化 SqliteSaver（会话/断点恢复）。"""
+        path = (self.data.get("memory") or {}).get("checkpoint_db")
+        return create_saver(path)
+
+    def create_store(self) -> Any:
+        """构造持久化 SqliteStore（长期记忆底层）。"""
+        path = (self.data.get("memory") or {}).get("store_db")
+        return create_store(path)
+
+    def _graph_agent_kwargs(self, *, registry: ToolRegistry) -> Dict[str, Any]:
+        """GraphAgent 共享注入（HITL/审计/成本/可观测/护栏）。"""
+        _, _, hitl_policy, audit_log = self.policy_components()
+        return {
+            "tools_registry": registry,
+            "hitl_policy": hitl_policy,
+            "audit_log": audit_log,
+            "cost_estimator": self.create_cost_estimator(),
+            "record_usage": self.data.get("agent", {}).get("record_usage", True),
+            "tracer": setup_telemetry(self.data.get("observability")),
+            "input_guard": self._input_guard(),
+            "output_guard": self._output_guard(),
+        }
+
+    def _input_guard(self) -> Optional[InputGuard]:
+        gr = self.data.get("guardrails") or {}
+        return (
+            InputGuard(deny_patterns=gr.get("input", {}).get("deny_patterns") or [])
+            if gr.get("input", {}).get("enabled", True)
+            else None
+        )
+
+    def _output_guard(self) -> Optional[OutputGuard]:
+        gr = self.data.get("guardrails") or {}
+        return (
+            OutputGuard(fallback_retries=gr.get("output", {}).get("fallback_retries", 1))
+            if gr.get("output", {}).get("enabled", True)
+            else None
+        )
+
+    def create_single_graph_agent(
+        self,
+        chat_model: Optional[Any] = None,
+        tools_registry: Optional[ToolRegistry] = None,
+        *,
+        checkpointer: Optional[Any] = None,
+        store: Optional[Any] = None,
+    ) -> GraphAgent:
+        """装配单 Agent GraphAgent（新图：ToolNode + 审批下沉 + SqliteSaver/store）。"""
+        registry = tools_registry or self.create_tools_registry()
+        chat_model = chat_model or create_chat_model(
+            self.data["llm"], tools=registry.get_all_tools()
+        )
+        agent_config = self.data["agent"]
+        return GraphAgent(
+            chat_model=chat_model,
+            checkpointer=checkpointer,
+            store=store,
+            max_steps=agent_config.get("max_steps", 20),
+            enable_compaction=agent_config.get("enable_compaction", True),
+            compaction_threshold_ratio=agent_config.get("compaction_threshold_ratio", 0.75),
+            compaction_keep_last_n=agent_config.get("compaction_keep_last_n", 6),
+            **self._graph_agent_kwargs(registry=registry),
+        )
+
+    def create_multi_graph_agent(
+        self,
+        *,
+        checkpointer: Optional[Any] = None,
+        store: Optional[Any] = None,
+        max_subagents: Optional[int] = None,
+    ) -> GraphAgent:
+        """装配多 Agent GraphAgent（create_agent 主编排图：decompose → Send 并行）。"""
+        settings = self.multi_agent_settings()
+        if max_subagents is not None:
+            settings["max_subagents"] = max_subagents
+        registry = self.create_tools_registry()
+        llm_cfg = dict(self.data.get("llm") or {})
+        chat_model = create_chat_model(llm_cfg)  # 终局归纳 / business worker
+        orchestrator_cfg = dict(llm_cfg)
+        if settings.get("orchestrator_model"):
+            orchestrator_cfg["model"] = settings["orchestrator_model"]
+        orchestrator_chat = create_chat_model(orchestrator_cfg)  # 拆解
+        business_worker = create_business_worker(chat_model, checkpointer=checkpointer, store=store)
+        command_worker = create_command_worker(
+            chat_model, tools_registry=registry, checkpointer=checkpointer, store=store
+        )
+        graph = build_multi_agent_graph(
+            orchestrator_llm=orchestrator_chat,
+            finalizer_llm=chat_model,
+            business_worker=business_worker,
+            command_worker=command_worker,
+            checkpointer=checkpointer,
+            store=store,
+        )
+        return GraphAgent(graph=graph, **self._graph_agent_kwargs(registry=registry))
+
+    def create_plan_graph_agent(
+        self,
+        *,
+        checkpointer: Optional[Any] = None,
+        store: Optional[Any] = None,
+        max_subagents: Optional[int] = None,
+    ) -> GraphAgent:
+        """装配 Plan-and-Execute GraphAgent（Plan 图：批次 Send 并行）。"""
+        registry = self.create_tools_registry()
+        llm_cfg = dict(self.data.get("llm") or {})
+        planner_llm = create_chat_model(llm_cfg)  # 规划
+        command_llm = create_chat_model(llm_cfg)  # 子任务执行
+        command_worker = create_command_worker(
+            command_llm, tools_registry=registry, checkpointer=checkpointer, store=store
+        )
+        graph = build_plan_graph(
+            planner_llm=planner_llm,
+            command_worker=command_worker,
+            checkpointer=checkpointer,
+            store=store,
+        )
+        return GraphAgent(graph=graph, **self._graph_agent_kwargs(registry=registry))
 
 

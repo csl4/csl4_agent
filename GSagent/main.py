@@ -6,7 +6,7 @@
 #   命令：run(单次) / chat(交互) / serve(占位) / toolset(列出工具集) /
 #         agents list / skills list|add|rm / history session|command / version。
 # 关键流程：
-#   Config → create_llm/create_tool_executor/create_tool_calling_llm（装配）
+#   Config → create_tools_registry/create_tool_calling_llm（装配）
 #   build_chat_messages → 构造 messages
 #   _run_turn() → 循环跑 call_stream()，解析 StreamMessage 事件并打印；
 #                 遇 APPROVAL_REQUIRED 就弹出审批交互，收集 tool_decisions 后 resume。
@@ -38,13 +38,14 @@ from GSagent.common.cli_commons import (
     opt_verbose,
 )
 from GSagent.config import Config
-from GSagent.core.agents import MainAgent, Orchestrator, ToolCallingLLM
+from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
 from GSagent.core.eval.dataset import EvalDatasetError, load_dataset
 from GSagent.core.eval.metrics import compare_baseline
 from GSagent.core.eval.runner import OfflineLLM, load_baseline, run_eval, save_baseline
-from GSagent.core.plan import PlanError, PlanExecutor, merge_plan_results, plan_with_llm
+from GSagent.core.plan import PlanError, merge_plan_results, plan_with_llm
 from GSagent.core.policy.audit import AuditLog
 from GSagent.core.prompts import build_chat_messages
+from GSagent.core.providers.factory import create_chat_model
 from GSagent.core.runtime.tasks import DurableTaskManager, queue_db_path
 from GSagent.core.history import SnapshotManager
 from GSagent.core.history.store import HistoryStore
@@ -58,7 +59,6 @@ from GSagent.core.memory import (
 )
 from GSagent.core.skills.env_info import collect_env_info, format_env_info
 from GSagent.core.skills.library import Skill, SkillLibrary
-from GSagent.core.tools import ToolsetTag
 from GSagent.plugins.toolsets.bash.common.cli_prefixes import (
     enable_cli_mode,
     save_cli_bash_tools_approved_prefixes,
@@ -93,9 +93,6 @@ app = typer.Typer(
 
 logger = logging.getLogger(__name__)
 
-# CLI 以单一本地身份运行
-CLI_TAG_FILTER = [ToolsetTag.CORE, ToolsetTag.CLI]  # 标签 ["core","cli"]
-
 MUTED_STYLE = "bright_black"
 
 # 企业级 HITL 三态（US1 T015，FR-003，contracts/config.md）
@@ -119,65 +116,39 @@ def _log_level_for_verbosity(verbose: Optional[List[bool]]) -> Optional[str]:
 
 
 def _create_agent(config: Config):
-    """根据配置创建 LLM、工具执行器和 agent。"""
-    llm = config.create_llm()
-    tool_executor = config.create_tool_executor(
-        toolset_tag_filter=CLI_TAG_FILTER,
-    )
-    agent = config.create_tool_calling_llm(
-        tool_executor=tool_executor,
-        llm=llm,
-    )
-    return llm, tool_executor, agent
+    """根据配置创建单 Agent GraphAgent（新图：ToolNode + 审批下沉 + SqliteSaver）。
+
+    装配失败（如未配置 API Key）→ 打印友好错误并干净退出，不抛未处理 traceback。
+    """
+    try:
+        registry = config.create_tools_registry()
+        agent = config.create_single_graph_agent(
+            tools_registry=registry, checkpointer=config.create_saver()
+        )
+        return agent, registry
+    except RuntimeError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
 
 
 def _create_multi_agent(
     config: Config, max_subagents: Optional[int] = None
-) -> MainAgent:
-    """装配多Agent 编排链路（复用组合根：create_llm / create_tool_executor）。
-
-    主 Agent 包装现有 ToolCallingLLM（单 Agent 行为不变）；
-    编排 Agent 负责拆解 + 并行调度；命令子任务由动态 SubAgent 经
-    同一 ToolExecutor 执行（FR-001）。
-    US3：装配本地技能库（FR-006）、环境信息快照（FR-007）与
-    历史存储（FR-008），一并注入编排/主 Agent。
+) -> GraphAgent:
+    """装配多Agent GraphAgent（create_agent 主编排图：decompose → Send 并行）。
 
     max_subagents: CLI 显式覆盖（`agent chat --max-subagents`），优先于配置。
+
+    装配失败（如未配置 API Key）→ 打印友好错误并干净退出，不抛未处理 traceback。
     """
-    settings = config.multi_agent_settings()
-    if max_subagents is not None:
-        if max_subagents <= 0:
-            raise typer.BadParameter("--max-subagents 必须是正整数。")
-        settings["max_subagents"] = max_subagents
-    llm = config.create_llm()
-    orchestrator_llm = llm
-    if settings.get("orchestrator_model"):
-        orchestrator_llm = config.create_llm()
-        orchestrator_llm.model = settings["orchestrator_model"]
-    tool_executor = config.create_tool_executor(
-        toolset_tag_filter=CLI_TAG_FILTER,
-    )
-    history = HistoryStore()
-    skill_library = SkillLibrary()
-    knowledge_text = format_env_info(
-        collect_env_info(tool_names=list(tool_executor.tools_by_name.keys()))
-    )
-    orchestrator = Orchestrator(
-        agent_id="orchestrator",
-        llm=orchestrator_llm,
-        tool_executor=tool_executor,
-        max_subagents=settings.get("max_subagents", 4),
-        skill_library=skill_library,
-        knowledge_text=knowledge_text,
-        history=history,
-    )
-    return MainAgent(
-        agent_id="main",
-        orchestrator=orchestrator,
-        llm=llm,
-        skill_library=skill_library,
-        knowledge_text=knowledge_text,
-    )
+    if max_subagents is not None and max_subagents <= 0:
+        raise typer.BadParameter("--max-subagents 必须是正整数。")
+    try:
+        return config.create_multi_graph_agent(
+            max_subagents=max_subagents, checkpointer=config.create_saver()
+        )
+    except RuntimeError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
 
 
 def _append_tool_result(
@@ -201,9 +172,9 @@ def _append_tool_result(
 
 
 def _consume_stream(
-    agent: ToolCallingLLM,
+    agent: GraphAgent,
     messages: List[Dict[str, Any]],
-    tool_decisions: Dict[str, bool],
+    resume_map: Optional[Dict[str, Dict[str, Any]]],
     session_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """执行一次 call_stream 遍历，边接收事件边打印。
@@ -222,6 +193,7 @@ def _consume_stream(
     pause: Optional[Dict[str, Any]] = None
     message_count: Optional[int] = None
     streamed_text = ""
+    pauses: List[PauseRequest] = []
 
     turn_start = time.monotonic()
 
@@ -244,14 +216,17 @@ def _consume_stream(
     spinner.start()
 
     try:
-        for event in agent.call_stream( #  call_stream消费生成器
+        for item in agent.stream(  # GraphAgent.stream：StreamMessage 渲染 + PauseRequest 暂停
             messages=messages,
-            enable_tool_approval=True,
-            tool_decisions=tool_decisions,
-            request_context=(
-                {"session_id": session_id} if session_id else None
-            ),
+            session_id=session_id or "session",
+            resume=resume_map or None,
         ):
+            if isinstance(item, PauseRequest):
+                # 审批/前端暂停（per-interrupt-id）：收集全部后一次返回
+                stop_spinner()
+                pauses.append(item)
+                continue
+            event = item  # StreamMessage
             if event.event == StreamEvents.ANSWER_DELTA:
                 # 把流式内容滚进单行转圈里（IDE 伪终端里多行 Live 刷新不可靠）；
                 # 完整答案卡片在 ANSWER_END 时才一次性打印。
@@ -279,27 +254,6 @@ def _consume_stream(
                     return_code=event.data.get("return_code"),
                 )
                 ensure_spinner("思考中 …")
-            elif event.event == StreamEvents.APPROVAL_REQUIRED:
-                stop_spinner()
-                pause = {
-                    "kind": "approval",
-                    "tool_name": event.data.get("tool_name", "?"),
-                    "tool_call_id": event.data.get("tool_call_id", ""),
-                    "reason": event.data.get("reason"),
-                    "prefixes_to_save": event.data.get("prefixes_to_save") or [],
-                    "pending_approvals": event.data.get("pending_approvals") or [],
-                    "messages": event.data.get("messages") or list(messages),
-                }
-                return final, pause
-            elif event.event == StreamEvents.FRONTEND_PAUSE:
-                stop_spinner()
-                pause = {
-                    "kind": "frontend",
-                    "tool_name": event.data.get("tool_name", "?"),
-                    "tool_call_id": event.data.get("tool_call_id", ""),
-                    "messages": event.data.get("messages") or list(messages),
-                }
-                return final, pause
             elif event.event == StreamEvents.MULTI_AGENT_DECOMPOSE:
                 task = event.data.get("task", "")
                 ensure_spinner(f"编排拆解任务 … {task[:40]}")
@@ -334,11 +288,13 @@ def _consume_stream(
     finally:
         stop_spinner()
 
+    if pauses:
+        return final, {"kind": "pause", "pauses": pauses, "messages": messages}
     return final, pause
 
 
 def _run_turn(
-    agent: ToolCallingLLM,
+    agent: GraphAgent,
     messages: List[Dict[str, Any]],  # 本轮请求的初始消息
     can_prompt: bool,
     session_id: Optional[str] = None,
@@ -355,7 +311,7 @@ def _run_turn(
         (final, session_history)：final 是 ANSWER_END 数据（若会话从未以答案结束则为 None）；
         session_history 是本次回合累积的会话消息（短期记忆）。
     """
-    decisions: Dict[str, bool] = {}
+    resume_map: Optional[Dict[str, Dict[str, Any]]] = None
     # 企业级（US2 T023，FR-007/004）：审批决策摘要，附到 final 供 `run --json` 输出。
     approval_summary: Dict[str, int] = {"approved": 0, "denied": 0, "auto_denied": 0}
     # 短期记忆（session_history）：回合中不断累积的会话消息，随审批/前端暂停而更新。
@@ -363,7 +319,7 @@ def _run_turn(
     session_history = list(messages)
 
     while True:
-        final, pause = _consume_stream(agent, session_history, decisions, session_id)
+        final, pause = _consume_stream(agent, session_history, resume_map, session_id)
 
         if pause is None:
             session_history = final.get("messages") if final else session_history
@@ -372,74 +328,55 @@ def _run_turn(
             return final, session_history
 
         session_history = pause["messages"]
+        pr_list: List[PauseRequest] = pause.get("pauses") or []
+        resume_map = {}
 
-        if pause["kind"] == "approval":
-            # 对暂停批次里每一个需要审批的调用都弹一次提示
-            # （事件里每个待审批的 tool_call_id 各带一条）。
-            pending: List[Dict[str, Any]] = pause.get("pending_approvals") or [
-                {
-                    "tool_name": pause["tool_name"],
-                    "tool_call_id": pause["tool_call_id"],
-                    "params": _pause_params(pause),
-                    "prefixes_to_save": pause.get("prefixes_to_save") or [],
-                }
-            ]
-            decisions = {}
-            for item in pending:
-                print_approval_request(
-                    item.get("tool_name", "?"), item.get("params") or {}
-                )
-                if can_prompt:
-                    approved = typer.confirm("  批准该操作？", default=False)
-                else:
-                    print_error(
-                        "工具需要审批，但 stdin 不是交互终端，已拒绝。"
-                        "如需预先放行，请把命令前缀加入 ./.GSagent/config.yaml "
-                        "的 `bash.allow` 列表（或设置 builtin_allowlist: extended）。"
+        for pr in pr_list:
+            if pr.type == "approval":
+                value = pr.value or {}
+                # 兼容多 Agent 子图冒泡（pending_approvals 列表）与单 Agent 单请求
+                pending: List[Dict[str, Any]] = value.get("pending_approvals") or [value]
+                for item in pending:
+                    print_approval_request(
+                        item.get("tool_name", "?"), item.get("params") or {}
                     )
-                    approved = False
-
-                # 引擎始终把 tool_call_id 作为 str 发出；在这里收窄类型，
-                # 保证字典键在静态层面是可哈希的（否则运行时会抛 TypeError）。
-                # 非 str 的一律跳过，交给孤儿工具调用兜底机制当作已取消处理。
-                tool_call_id = item["tool_call_id"]
-                if not isinstance(tool_call_id, str):
-                    continue
-
-                if approved:
-                    decisions[tool_call_id] = True
-                    approval_summary["approved"] += 1
-                    # 持久化前缀会扩大所有未来会话的 allow 列表，因此必须
-                    # 通过第二次提示明确征得同意（严格 opt-in）。
-                    prefixes = item.get("prefixes_to_save") or []
-                    if prefixes and can_prompt:
-                        if typer.confirm(
-                            f"  记住前缀 {prefixes}，让以后相同前缀的命令免审批？",
-                            default=False,
-                        ):
-                            save_cli_bash_tools_approved_prefixes(prefixes)
-                else:
-                    # 拒绝型工具消息在恢复时由
-                    # ToolCallingLLM._execute_tool_decisions 追加。
-                    decisions[tool_call_id] = False
                     if can_prompt:
-                        approval_summary["denied"] += 1
+                        approved = typer.confirm("  批准该操作？", default=False)
                     else:
-                        approval_summary["auto_denied"] += 1
+                        print_error(
+                            "工具需要审批，但 stdin 不是交互终端，已拒绝。"
+                            "如需预先放行，请把命令前缀加入 ./.GSagent/config.yaml "
+                            "的 `bash.allow` 列表（或设置 builtin_allowlist: extended）。"
+                        )
+                        approved = False
 
-        else:  # frontend pause
-            print_warning(
-                f"工具 '{pause['tool_name']}' 正在等待前端执行器，"
-                "但当前 CLI 没有前端，已中止该工具调用。"
-            )
-            session_history = _append_tool_result(
-                session_history,
-                pause["tool_call_id"],
-                pause["tool_name"],
-                "Frontend execution is not available in this environment. "
-                "Tell the user this action cannot be completed.",
-            )
-            decisions = {}
+                    resume_map[pr.id] = {"approved": approved}
+                    if approved:
+                        approval_summary["approved"] += 1
+                        # 持久化前缀会扩大所有未来会话的 allow 列表，因此必须
+                        # 通过第二次提示明确征得同意（严格 opt-in）。
+                        prefixes = item.get("prefixes_to_save") or []
+                        if prefixes and can_prompt:
+                            if typer.confirm(
+                                f"  记住前缀 {prefixes}，让以后相同前缀的命令免审批？",
+                                default=False,
+                            ):
+                                save_cli_bash_tools_approved_prefixes(prefixes)
+                    else:
+                        if can_prompt:
+                            approval_summary["denied"] += 1
+                        else:
+                            approval_summary["auto_denied"] += 1
+            else:  # frontend pause
+                print_warning(
+                    f"工具 '{pr.value.get('tool_name', '?')}' 正在等待前端执行器，"
+                    "但当前 CLI 没有前端，已中止该工具调用。"
+                )
+                resume_map[pr.id] = {
+                    "frontend_tool_results": {
+                        "value": "Frontend execution is not available in this environment."
+                    }
+                }
 
 
 def _pause_params(pause: Dict[str, Any]) -> Dict[str, Any]:
@@ -561,9 +498,9 @@ def run(
         print_user(prompt)
         print_rule()
 
-    llm, tool_executor, agent = _create_agent(config)
+    agent, registry = _create_agent(config)
 
-    messages = build_chat_messages(ask=prompt, toolsets=tool_executor.enabled_toolsets)
+    messages = build_chat_messages(ask=prompt, toolsets=registry.get_all_tools())
 
     # 只有 stdin 是真实终端时才能交互式审批
     # （管道输入此刻已被消费完毕）。
@@ -602,53 +539,23 @@ def run(
 
 
 def _run_plan_turn(
-    llm: Any,
-    tool_executor: Any,
+    agent: GraphAgent,
     user_input: str,
     session_id: str,
-    max_subagents: int = 4,
+    can_prompt: bool = False,
 ) -> Optional[str]:
     """Plan-and-Execute 单回合（US3 T028，FR-008，contracts/cli.md）。
 
-    规划（LLM → 子任务 DAG）→ 消费 PLAN/PLAN_TASK 事件流（宪法 II：
-    CLI 只见 StreamMessage）→ 打印归并结果。返回归并文本；失败返回 None
-    （错误已打印，不静默）。
+    走 Plan GraphAgent（规划 → Send 批次并行 → 归并），产出 PLAN/PLAN_TASK/
+    ANSWER_END 事件（宪法 II：CLI 只见 StreamMessage）。返回归并文本；失败返回 None。
     """
-    try:
-        tasks = plan_with_llm(llm, user_input)
-    except PlanError as exc:
-        print_error(f"规划失败: {exc}")
+    messages = build_chat_messages(ask=user_input, toolsets=[])
+    final, _ = _run_turn(agent, messages, can_prompt=can_prompt, session_id=session_id)
+    if final is None:
         return None
-
-    executor = PlanExecutor(tool_executor=tool_executor, max_subagents=max_subagents)
-    try:
-        for event in executor.run_stream(tasks, parent_id=f"plan-{session_id}"):
-            if event.event == StreamEvents.PLAN:
-                data = event.data
-                console.print(
-                    f"[bold cyan]规划[/bold cyan] {len(data.get('tasks', []))} 个子任务、"
-                    f"{len(data.get('batches', []))} 个批次（按依赖并行执行）"
-                )
-            elif event.event == StreamEvents.PLAN_TASK:
-                d = event.data
-                print_tool_result(
-                    f"任务[{d.get('task_id', '?')}]",
-                    d.get("status", "?"),
-                    0.0,
-                    invocation=d.get("description"),
-                )
-                result = (d.get("result") or "").strip()
-                if result:
-                    console.print(f"[dim]      → {result}[/dim]")
-    except PlanError as exc:
-        print_error(f"计划执行失败: {exc}")
-        return None
-
-    if executor.last_run is not None:
-        summary = merge_plan_results(executor.last_run)
-        print_agent(summary)
-        return summary
-    return None
+    summary = final.get("content") or ""
+    print_agent(summary)
+    return summary
 
 
 @dataclass
@@ -664,8 +571,7 @@ class _ChatCtx:
     toolsets: List[Any]
     session_id: str = ""
     plan_mode: bool = False
-    plan_llm: Any = None
-    plan_tool_executor: Any = None
+    plan_agent: Any = None
     memory_store: Optional[MemoryStore] = None
     memory_scope: str = ""
     memory_user: str = ""
@@ -674,17 +580,15 @@ class _ChatCtx:
     session_mode: str = "chat"
 
 
-def _print_tools(toolsets: List[Any]) -> None:
-    """按工具集分组列出可用工具（/tool）。"""
+def _print_tools(tools: List[Any]) -> None:
+    """列出可用工具（/tool，langchain @tool 注册表）。"""
     table = Table(title="可用工具")
-    table.add_column("工具集", style="bold")
     table.add_column("工具", style="bold")
     table.add_column("说明")
-    for toolset in toolsets:
-        for tool in getattr(toolset, "tools", []):
-            table.add_row(toolset.name, tool.name, tool.description)
+    for tool in tools:
+        table.add_row(tool.name, (getattr(tool, "description", "") or "")[:80])
     console.print(table)
-    if not toolsets:
+    if not tools:
         print_hint("暂无可用工具。")
 
 
@@ -804,8 +708,7 @@ def _chat_loop(
     agent: Any,
     toolsets: List[Any],
     plan_mode: bool = False,
-    plan_llm: Any = None,
-    plan_tool_executor: Any = None,
+    plan_agent: Any = None,
     memory_store: Optional[MemoryStore] = None,
     session_memory: Optional[SessionMemoryStore] = None,
     skill_library: Optional[SkillLibrary] = None,
@@ -813,13 +716,12 @@ def _chat_loop(
     memory_user: str = "",
     session_mode: str = "chat",
 ) -> None:
-    """交互式聊天主循环：每轮消费 agent.call_stream()（单/多Agent 通用）。
+    """交互式聊天主循环：每轮消费 GraphAgent.stream()（单/多Agent/Plan 通用）。
 
-    `agent` 可以是 ToolCallingLLM（单 Agent）或 MainAgent（多Agent 编排），
-    二者均实现同签名 call_stream()（宪法 II：CLI 只见 StreamMessage 事件流）。
+    `agent`：GraphAgent（单 Agent 或主编排图），产出 StreamMessage + PauseRequest。
 
     plan_mode：Plan-and-Execute（US3 T028）——每回合独立规划 DAG 并按依赖批次
-    并行执行（经 `_run_plan_turn`），确定性执行路径，不累积会话短期记忆。
+    并行执行（经 `plan_agent`），确定性执行路径，不累积会话短期记忆。
     """
     session_history: Optional[List[Dict[str, Any]]] = None
     # 企业级（US2 T022）：整个交互会话共用一个会话 ID（审计按会话聚合）。
@@ -829,8 +731,7 @@ def _chat_loop(
         toolsets=toolsets,
         session_id=session_id,
         plan_mode=plan_mode,
-        plan_llm=plan_llm,
-        plan_tool_executor=plan_tool_executor,
+        plan_agent=plan_agent,
         memory_store=memory_store,
         memory_scope=memory_scope,
         memory_user=memory_user,
@@ -869,15 +770,9 @@ def _chat_loop(
 
         # US3 T028：plan 模式——确定性 DAG 规划 + 按依赖批次并行执行
         # （独立于 ReAct 主循环；每回合不累积短期记忆，故不落盘）。
-        if (
-            ctx.plan_mode
-            and ctx.plan_llm is not None
-            and ctx.plan_tool_executor is not None
-        ):
+        if ctx.plan_mode and ctx.plan_agent is not None:
             try:
-                _run_plan_turn(
-                    ctx.plan_llm, ctx.plan_tool_executor, user_input, session_id
-                )
+                _run_plan_turn(ctx.plan_agent, user_input, session_id)
             except Exception as e:  # noqa: BLE001 - CLI 层容错
                 logger.debug("Plan turn failed", exc_info=True)
                 print_error(f"Plan 回合失败: {e}")
@@ -975,22 +870,23 @@ def chat(
             print_hint(
                 "plan 模式接管：--multi-agent/配置拆解被忽略，改用确定性 DAG 规划。\n"
             )
-        llm, tool_executor, agent = _create_agent(config)
+        plan_agent = config.create_plan_graph_agent(
+            checkpointer=config.create_saver(), max_subagents=max_subagents
+        )
         print_banner(
-            model=llm.model,
-            tool_count=len(tool_executor.tools_by_name),
-            compaction_enabled=agent.enable_compaction,
+            model=config.data["llm"]["model"],
+            tool_count=len(plan_agent.tools_registry),
+            compaction_enabled=True,
         )
         print_hint(
             "Plan-and-Execute 模式：先规划任务 DAG，再按依赖批次并行执行。"
             "输入你的问题，'/exit' 退出。\n"
         )
         _chat_loop(
-            agent,
-            tool_executor.enabled_toolsets,
+            plan_agent,
+            plan_agent.tools_registry.get_all_tools(),
             plan_mode=True,
-            plan_llm=llm,
-            plan_tool_executor=tool_executor,
+            plan_agent=plan_agent,
             memory_store=memory_store,
             memory_scope=memory_scope,
             memory_user=memory_user,
@@ -1006,55 +902,40 @@ def chat(
                 "（可用 agent chat --multi-agent 显式指定）。\n"
             )
         main_agent = _create_multi_agent(config, max_subagents=max_subagents)
-        tool_executor = (
-            main_agent.orchestrator.tool_executor
-            if main_agent.orchestrator is not None
-            else None
-        )
+        registry = main_agent.tools_registry
         print_banner(
             model=config.data["llm"]["model"],
-            tool_count=len(tool_executor.tools_by_name) if tool_executor else 0,
-            compaction_enabled=config.data["agent"].get("enable_compaction", True),
+            tool_count=len(registry) if registry else 0,
+            compaction_enabled=True,
         )
         print_hint(
             "多Agent 编排模式：主/编排/业务/SubAgent 协作。"
             "输入你的问题，'/exit' 退出。\n"
         )
-        # FR-008：会话生命周期落历史（open → close）。
-        history = main_agent.orchestrator.history if main_agent.orchestrator else None
-        session_id = f"cli-{uuid.uuid4().hex[:8]}"
-        if history is not None:
-            history.append_session(session_id=session_id, payload={"status": "open"})
-        try:
-            _chat_loop(
-                main_agent,
-                tool_executor.enabled_toolsets if tool_executor else [],
-                memory_store=memory_store,
-                memory_scope=memory_scope,
-                memory_user=memory_user,
-                session_memory=session_memory,
-                skill_library=skill_library,
-                session_mode="multi_agent",
-            )
-        finally:
-            if history is not None:
-                history.append_session(
-                    session_id=session_id, payload={"status": "closed"}
-                )
+        _chat_loop(
+            main_agent,
+            registry.get_all_tools() if registry else [],
+            memory_store=memory_store,
+            memory_scope=memory_scope,
+            memory_user=memory_user,
+            session_memory=session_memory,
+            skill_library=skill_library,
+            session_mode="multi_agent",
+        )
         return
 
-    llm, tool_executor, agent = _create_agent(config) # 创建llm ,tool
+    agent, registry = _create_agent(config)
 
     print_banner(
-        model=llm.model,
-        tool_count=len(tool_executor.tools_by_name),
+        model=config.data["llm"]["model"],
+        tool_count=len(registry),
         compaction_enabled=agent.enable_compaction,
     )
     print_hint("输入你的问题，'/exit' 或 Ctrl+C 退出。\n")
 
     _chat_loop(
         agent,
-        tool_executor.enabled_toolsets,
+        registry.get_all_tools(),
         memory_store=memory_store,
         memory_scope=memory_scope,
         memory_user=memory_user,
@@ -1094,7 +975,11 @@ def serve(
     from GSagent.core.runtime.server import create_app
     import uvicorn
 
-    app = create_app(config=config, hitl_mode=mode)
+    try:
+        app = create_app(config=config, hitl_mode=mode)
+    except RuntimeError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
     print_hint(f"Runtime API 监听 {host}:{serve_port}（审批模式 {mode}）")
     uvicorn.run(app, host=host, port=int(serve_port))
 
@@ -1104,37 +989,29 @@ def toolset(
     config_file: Optional[Path] = opt_config_file,
     verbose: Optional[List[bool]] = opt_verbose,
 ) -> None:
-    """列出可用的工具集及其状态。"""
+    """列出可用的 langchain 工具（@tool 注册表，002-langchain-ecosystem）。"""
     setup_logging(_log_level_for_verbosity(verbose))
     config = Config(config_path=config_file)
     # 这里不需要 LLM —— 只列出工具注册表。
-    tool_executor = config.create_tool_executor(
-        toolset_tag_filter=CLI_TAG_FILTER,
-    )
+    registry = config.create_tools_registry()
+    tools = registry.get_all_tools()
 
     table = Table(title="工具集", show_lines=False)
-    table.add_column("工具集", style="bold")
-    table.add_column("状态")
-    table.add_column("类型", style=MUTED_STYLE)
-    table.add_column("标签", style=MUTED_STYLE)
-    table.add_column("工具数", justify="right")
+    table.add_column("工具", style="bold")
+    table.add_column("说明")
+    table.add_column("参数", style=MUTED_STYLE)
 
-    for ts in tool_executor.toolsets:
-        loaded = ts in tool_executor.enabled_toolsets
-        status = "[green]已启用[/green]" if loaded else "[bright_black]已过滤[/bright_black]"
+    for t in tools:
+        args = getattr(t, "args", None) or {}
+        param_names = ", ".join(args.keys()) if args else "-"
         table.add_row(
-            ts.name,
-            status,
-            ts.type.value if ts.type else "-",
-            ", ".join(t.value for t in ts.tags) or "-",
-            str(len(ts.tools)),
+            t.name,
+            (getattr(t, "description", "") or "")[:60],
+            param_names,
         )
 
     console.print(table)
-    console.print(
-        f"[bright_black]已加载 {len(tool_executor.tools_by_name)} 个工具 "
-        f"（标签过滤: CORE, CLI）[/bright_black]"
-    )
+    console.print(f"[bright_black]已加载 {len(tools)} 个工具[/bright_black]")
 
 
 agents_app = typer.Typer(
@@ -1603,7 +1480,14 @@ def eval_run(
         raise typer.Exit(code=1)
 
     config = Config(config_path=config_file)
-    llm = config.create_llm() if use_llm else OfflineLLM()
+    if use_llm:
+        try:
+            llm = create_chat_model(config.data.get("llm"))
+        except RuntimeError as exc:
+            print_error(str(exc))
+            raise typer.Exit(code=1) from exc
+    else:
+        llm = OfflineLLM()
     report = run_eval(cases, llm)
 
     baseline_name = baseline or path.stem
@@ -1631,7 +1515,14 @@ def eval_baseline(
         raise typer.Exit(code=1)
 
     config = Config(config_path=config_file)
-    llm = config.create_llm() if use_llm else OfflineLLM()
+    if use_llm:
+        try:
+            llm = create_chat_model(config.data.get("llm"))
+        except RuntimeError as exc:
+            print_error(str(exc))
+            raise typer.Exit(code=1) from exc
+    else:
+        llm = OfflineLLM()
     report = run_eval(cases, llm)
 
     baseline_name = name or path.stem

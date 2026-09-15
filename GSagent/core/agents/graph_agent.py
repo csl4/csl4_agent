@@ -91,8 +91,9 @@ class GraphAgent:
 
     def __init__(
         self,
-        chat_model: BaseChatModel,
+        chat_model: Optional[BaseChatModel] = None,
         *,
+        graph: Optional[Any] = None,
         tools_registry: Optional[ToolRegistry] = None,
         max_steps: int = 20,
         enable_compaction: bool = True,
@@ -129,26 +130,48 @@ class GraphAgent:
         self.input_guard = input_guard
         self.output_guard = output_guard
 
-        bridge = _CompactionBridge(chat_model)
-        self._compactor = SessionCompactor(llm=bridge, keep_last_n=compaction_keep_last_n)
-        self._limiter = ContextWindowLimiter(
-            llm=bridge, threshold_ratio=compaction_threshold_ratio
+        bridge = _CompactionBridge(chat_model) if chat_model is not None else None
+        self._compactor = (
+            SessionCompactor(llm=bridge, keep_last_n=compaction_keep_last_n) if bridge else None
+        )
+        self._limiter = (
+            ContextWindowLimiter(llm=bridge, threshold_ratio=compaction_threshold_ratio)
+            if bridge
+            else None
         )
         self._saver = checkpointer
         self._store = store
-        self._graph = build_graph_agent(
-            self, checkpointer=checkpointer, store=store
-        )
+        if graph is not None:
+            # 外部装配的图（多 Agent / Plan）：初始状态只需 messages 通道
+            self._graph = graph
+            self._external_graph = True
+        else:
+            self._graph = build_graph_agent(
+                self, checkpointer=checkpointer, store=store
+            )
+            self._external_graph = False
 
     # ---- 图状态构造 ----
-    @staticmethod
     def _build_initial_state(
+        self,
         *,
         messages: List[Dict[str, Any]],
         request_context: Optional[Dict[str, Any]],
         cancel_event: Any,
         enable_tool_approval: bool,
     ) -> Dict[str, Any]:
+        """构造图初始状态。
+
+        外部注入图（多 Agent / Plan）只需 messages + request_context 通道；
+        单 Agent 图（自建 build_graph_agent）补充编排内部字段。
+        """
+        if self._external_graph:
+            return {
+                "messages": dict_to_messages(messages),
+                "request_context": request_context,
+                "cancel_event": cancel_event,
+                "_stream_messages": [],
+            }
         return {
             "messages": dict_to_messages(messages),
             "last_tool_calls": [],
