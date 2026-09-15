@@ -110,20 +110,29 @@ class TestDeleteAndPrune:
         assert adapter.forget_scope(SCOPE, user="alice") == 1
         assert [r["content"] for r in adapter.list(SCOPE, user="bob")] == ["b1"]
 
-    def test_prune_lru(self, adapter):
-        """超 max_entries → 按 last_access_at 淘汰最旧。"""
+    def test_prune_lru(self):
+        """超 max_entries → 按 last_access_at 淘汰最旧（先写的最旧先淘汰）。"""
+        from datetime import datetime, timedelta, timezone
+
+        from langgraph.store.memory import InMemoryStore
+
+        # 可控递增 clock：写入时间严格递增，last_access_at 可预测
+        clock = {"t": 0}
+
+        def _clock():
+            clock["t"] += 1
+            return datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=clock["t"])
+
+        adapter = StoreMemoryAdapter(InMemoryStore(), max_entries=10, clock=_clock)
         for i in range(10):
             adapter.remember(scope=SCOPE, content=f"a{i}", user="alice")
-        # 访问 a0 使其新近，淘汰时保留
-        rows = adapter.search(SCOPE, "a0", user="alice")
-        assert rows, "a0 应被召回"
         # 再写一条触发 prune（max_entries=10）
         adapter.remember(scope=SCOPE, content="extra", user="alice")
         after = adapter.list(SCOPE, user="alice")
         assert len(after) <= 10
         contents = {r["content"] for r in after}
         assert "extra" in contents, "新写入保留"
-        assert "a0" in contents, "近期访问的 a0 保留（LRU 语义）"
+        assert "a0" not in contents, "最先写入的 a0（last_access_at 最早）应被 LRU 淘汰"
 
     def test_user_isolation(self, adapter):
         adapter.remember(scope=SCOPE, content="A 的偏好", user="alice")
