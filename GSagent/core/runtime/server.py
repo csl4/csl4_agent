@@ -39,16 +39,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from GSagent.config import Config
+from GSagent.core.agents.graph_agent import GraphAgent, PauseRequest
 from GSagent.core.prompts import build_chat_messages
 from GSagent.core.runtime.tasks import DurableTaskManager, queue_db_path
-from GSagent.core.agents import ToolCallingLLM
-from GSagent.core.tools import ToolsetTag
 from GSagent.utils.stream import StreamEvents
 
 logger = logging.getLogger(__name__)
-
-# 服务端工具标签过滤：排除仅 CLI 专用工具集（serve 占位注释约定）。
-SERVER_TAG_FILTER = [ToolsetTag.CORE, ToolsetTag.CLUSTER]
 
 DEFAULT_SCOPE = "(default)"
 DEFAULT_LEASE_SECS = 60
@@ -98,7 +94,7 @@ class _EventBuffer:
 def create_app(
     config: Optional[Config] = None,
     *,
-    agent: Optional[ToolCallingLLM] = None,
+    agent: Optional[GraphAgent] = None,
     task_manager: Optional[DurableTaskManager] = None,
     hitl_mode: str = "never",
     worker_interval: float = 0.1,
@@ -108,7 +104,7 @@ def create_app(
     """构建 Runtime API 应用。
 
     config：配置（组装默认 agent 与任务队列路径）；agent/task_manager 均注入时可为 None。
-    agent：可注入的 ToolCallingLLM（测试用 ScriptedLLM 打桩）；None 时按 config 装配。
+    agent：可注入的 GraphAgent（测试用 FakeChatLLM 打桩）；None 时按 config 装配。
     task_manager：可注入；None 时按 runtime.queue_db 新建。
     hitl_mode：serve 审批模式，默认 never（无审批界面 → 危险操作拒绝，FR-004）。
     """
@@ -116,9 +112,7 @@ def create_app(
         config = config or Config()
         # serve 默认 never：服务无人类审批界面（FR-004）。
         config.data.setdefault("policy", {})["hitl_mode"] = hitl_mode
-        llm = config.create_llm()
-        executor = config.create_tool_executor(toolset_tag_filter=SERVER_TAG_FILTER)
-        agent = config.create_tool_calling_llm(tool_executor=executor, llm=llm)
+        agent = config.create_single_graph_agent(checkpointer=config.create_saver())
 
     if task_manager is None:
         config = config or Config()
@@ -149,7 +143,7 @@ def create_app(
     app.state.event_buffers: Dict[str, _EventBuffer] = {}
     app.state.task_manager = task_mgr
     app.state.agent = agent
-    app.state.toolsets = agent.tool_executor.enabled_toolsets
+    app.state.toolsets = agent.tools_registry.get_all_tools()
     app.state.known_scopes: set = {DEFAULT_SCOPE}
     app.state.scopes_lock = threading.Lock()
     app.state.stop_event = stop_event
@@ -182,15 +176,25 @@ def create_app(
 
         def run_turn() -> None:
             final_msgs = list(messages)
+            resume: Optional[Dict[str, Dict[str, Any]]] = None
             try:
-                for event in app.state.agent.call_stream(
-                    messages=final_msgs,
-                    enable_tool_approval=True,
-                    request_context={"session_id": thread_id},
-                ):
-                    buffer.push(event.to_sse())
-                    if event.event == StreamEvents.ANSWER_END:
-                        final_msgs = event.data.get("messages", final_msgs)
+                while True:
+                    saw_pause = False
+                    for item in app.state.agent.stream(
+                        messages=final_msgs,
+                        session_id=thread_id,
+                        resume=resume,
+                    ):
+                        if isinstance(item, PauseRequest):
+                            # serve 无人类审批界面 → 自动拒绝该审批（FR-004）
+                            resume = {item.id: {"approved": False}}
+                            saw_pause = True
+                            continue
+                        buffer.push(item.to_sse())
+                        if item.event == StreamEvents.ANSWER_END:
+                            final_msgs = item.data.get("messages", final_msgs)
+                    if not saw_pause:
+                        break
             except Exception as exc:  # noqa: BLE001 - 回合失败也关闭事件流
                 logger.exception("线程回合失败: %s", exc)
                 buffer.push(
@@ -293,12 +297,20 @@ def _run_one_task(app: FastAPI, scope: str) -> None:
         messages = build_chat_messages(
             ask=prompt, session_history=None, toolsets=state.toolsets
         )
-        for event in state.agent.call_stream(
-            messages=messages,
-            enable_tool_approval=True,
-            request_context={"session_id": tid},
-        ):
-            if event.event == StreamEvents.ANSWER_END:
+        resume: Optional[Dict[str, Dict[str, Any]]] = None
+        while True:
+            saw_pause = False
+            for item in state.agent.stream(
+                messages=messages, session_id=tid, resume=resume
+            ):
+                if isinstance(item, PauseRequest):
+                    # 后台任务无审批界面 → 自动拒绝
+                    resume = {item.id: {"approved": False}}
+                    saw_pause = True
+                    continue
+                if item.event == StreamEvents.ANSWER_END:
+                    break
+            if not saw_pause:
                 break
         if state.task_manager.is_canceled(tid):
             return  # 迟到结果不覆盖 canceled
@@ -309,4 +321,4 @@ def _run_one_task(app: FastAPI, scope: str) -> None:
             state.task_manager.fail(tid, state.worker_id)
 
 
-__all__ = ["create_app", "SERVER_TAG_FILTER"]
+__all__ = ["create_app"]
