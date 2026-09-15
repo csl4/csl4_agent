@@ -15,26 +15,24 @@ LangGraph 图，CLI/serve 通过 ``GraphAgent.stream()`` 消费 updates 流并�
 """
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage
 from langgraph.types import Command
 
-from GSagent.core.llm_adapter import dict_to_messages, messages_to_dict
+from GSagent.core.llm_adapter import dict_to_messages
 from GSagent.core.observability import (
     AgentEventType,
     CostEstimator,
     EventEmitter,
     MemoryEventStore,
 )
-from GSagent.core.observability.telemetry import setup_telemetry
 from GSagent.core.orchestration.graph import build_graph_agent
 from GSagent.core.orchestration.nodes import _emit
 from GSagent.core.policy.audit import AuditLog
 from GSagent.core.policy.hitl import HitlPolicy
-from GSagent.core.prompts import build_chat_messages
 from GSagent.core.tools.registry import ToolRegistry
 from GSagent.core.truncation.compaction import SessionCompactor
 from GSagent.core.truncation.input_context_window_limiter import ContextWindowLimiter
@@ -55,31 +53,6 @@ class PauseRequest:
     id: str
     type: str
     value: Dict[str, Any] = field(default_factory=dict)
-
-
-class _CompactionBridge:
-    """把 BaseChatModel 适配成压缩模块（limiter/compactor）期望的 dict 接口。"""
-
-    def __init__(self, chat_model: BaseChatModel) -> None:
-        self.chat_model = chat_model
-
-    def count_tokens(self, messages: List[Dict[str, Any]], tools: Optional[list] = None) -> Any:
-        bmsgs = dict_to_messages(messages)
-        n = self.chat_model.get_num_tokens_from_messages(bmsgs)
-        return type("_Usage", (), {"total_tokens": n})()
-
-    def get_context_window_size(self) -> int:
-        return int(getattr(self.chat_model, "max_tokens", None) or 0) or 128000
-
-    def completion(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[list] = None,
-        stream: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        ai = self.chat_model.invoke(dict_to_messages(messages))
-        return type("_Resp", (), {"content": ai.content or ""})()
 
 
 class GraphAgent:
@@ -130,13 +103,14 @@ class GraphAgent:
         self.input_guard = input_guard
         self.output_guard = output_guard
 
-        bridge = _CompactionBridge(chat_model) if chat_model is not None else None
         self._compactor = (
-            SessionCompactor(llm=bridge, keep_last_n=compaction_keep_last_n) if bridge else None
+            SessionCompactor(llm=chat_model, keep_last_n=compaction_keep_last_n)
+            if chat_model is not None
+            else None
         )
         self._limiter = (
-            ContextWindowLimiter(llm=bridge, threshold_ratio=compaction_threshold_ratio)
-            if bridge
+            ContextWindowLimiter(llm=chat_model, threshold_ratio=compaction_threshold_ratio)
+            if chat_model is not None
             else None
         )
         self._saver = checkpointer
@@ -165,27 +139,24 @@ class GraphAgent:
         外部注入图（多 Agent / Plan）只需 messages + request_context 通道；
         单 Agent 图（自建 build_graph_agent）补充编排内部字段。
         """
-        if self._external_graph:
-            return {
-                "messages": dict_to_messages(messages),
-                "request_context": request_context,
-                "cancel_event": cancel_event,
-                "_stream_messages": [],
-            }
-        return {
+        state: Dict[str, Any] = {
             "messages": dict_to_messages(messages),
-            "last_tool_calls": [],
-            "prev_tool_calls": [],
-            "no_progress_streak": 0,
-            "iteration": 0,
-            "tool_number": 0,
-            "terminated": None,
-            "enable_tool_approval": bool(enable_tool_approval),
             "request_context": request_context,
             "cancel_event": cancel_event,
-            "_events": [],
             "_stream_messages": [],
         }
+        if not self._external_graph:
+            state.update(
+                last_tool_calls=[],
+                prev_tool_calls=[],
+                no_progress_streak=0,
+                iteration=0,
+                tool_number=0,
+                terminated=None,
+                enable_tool_approval=bool(enable_tool_approval),
+                _events=[],
+            )
+        return state
 
     # ---- 对外入口 ----
     def stream(
@@ -240,49 +211,46 @@ class GraphAgent:
         cancel_event: Any,
     ) -> Generator[Any, None, None]:
         """遍历图，yield 渲染事件与暂停请求。"""
-        tracer = self._tracer
         saw_terminal = False
-
-        def _iter():
-            nonlocal saw_terminal
-            for chunk in self._graph.stream(
-                stream_input, config, stream_mode="updates"
-            ):
-                if cancel_event is not None and cancel_event.is_set():
-                    saw_terminal = True
-                    yield StreamMessage(
-                        event=StreamEvents.ERROR, data={"error": "   cancelled by user."}
-                    )
-                    return
-                if "__interrupt__" in chunk:
-                    saw_terminal = True
-                    for intr in chunk["__interrupt__"]:
-                        value = intr.value or {}
-                        ptype = "approval" if value.get("type") == "approval" else "frontend"
-                        yield PauseRequest(id=intr.id, type=ptype, value=value)
-                    return
-                for _node_name, node_updates in chunk.items():
-                    if _node_name == "__interrupt__":
-                        continue
-                    node_updates = node_updates or {}
-                    for sm_data in node_updates.get("_stream_messages") or []:
-                        sm = (
-                            sm_data
-                            if isinstance(sm_data, StreamMessage)
-                            else StreamMessage(**sm_data)
-                        )
-                        if sm.event in (StreamEvents.ANSWER_END, StreamEvents.ERROR):
-                            saw_terminal = True
-                        yield sm
-
+        span_ctx = (
+            self._tracer.start_as_current_span("invoke_agent")
+            if self._tracer is not None
+            else nullcontext()
+        )
         try:
-            if tracer is not None:
-                with tracer.start_as_current_span("invoke_agent") as span:
+            with span_ctx as span:
+                if span is not None:
                     span.set_attribute("gen_ai.operation.name", "invoke_agent")
                     span.set_attribute("agent_id", self.agent_id)
-                    yield from _iter()
-            else:
-                yield from _iter()
+                for chunk in self._graph.stream(
+                    stream_input, config, stream_mode="updates"
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        saw_terminal = True
+                        yield StreamMessage(
+                            event=StreamEvents.ERROR, data={"error": "   cancelled by user."}
+                        )
+                        return
+                    if "__interrupt__" in chunk:
+                        saw_terminal = True
+                        for intr in chunk["__interrupt__"]:
+                            value = intr.value or {}
+                            ptype = "approval" if value.get("type") == "approval" else "frontend"
+                            yield PauseRequest(id=intr.id, type=ptype, value=value)
+                        return
+                    for _node_name, node_updates in chunk.items():
+                        if _node_name == "__interrupt__":
+                            continue
+                        node_updates = node_updates or {}
+                        for sm_data in node_updates.get("_stream_messages") or []:
+                            sm = (
+                                sm_data
+                                if isinstance(sm_data, StreamMessage)
+                                else StreamMessage(**sm_data)
+                            )
+                            if sm.event in (StreamEvents.ANSWER_END, StreamEvents.ERROR):
+                                saw_terminal = True
+                            yield sm
         except Exception as exc:  # noqa: BLE001 - 编排兜底
             logger.exception("LangGraph graph execution failed: %s", exc)
             yield StreamMessage(

@@ -10,6 +10,8 @@
 import logging
 from typing import Any, Dict, List, Optional
 
+from langchain_core.messages import HumanMessage
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_COMPACTION_PROMPT = (
@@ -42,7 +44,7 @@ class SessionCompactor:
         """初始化压缩器。
 
         参数:
-            llm: LLM 实例（必须具有 completion() 方法）。
+            llm: BaseChatModel 实例（摘要用 invoke()）。
             compaction_prompt: 用于摘要的自定义提示词模板。
                 必须包含 `{session_history}` 占位符。
             keep_last_n: 保留不压缩的最近消息条数。
@@ -157,11 +159,7 @@ class SessionCompactor:
         prompt = self.compaction_prompt.format(session_history=session_text)
 
         try:
-            response = self.llm.completion(
-                messages=[{"role": "user", "content": prompt}],
-                tools=None,
-                stream=False,
-            )
+            response = self.llm.invoke([HumanMessage(content=prompt)])
             return response.content or "(summary unavailable)"
         except Exception as e:
             logger.warning(f"Compaction summarization failed: {e}")
